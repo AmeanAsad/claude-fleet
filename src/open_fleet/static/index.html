@@ -359,12 +359,13 @@
 
   async function refreshWorkers() {
     try {
-      const workers = await api('/workers');
-      const list = $('#workerList');
+      var workers = await api('/workers');
+      var list = $('#workerList');
       list.replaceChildren();
 
       workers.forEach(function(w) {
-        const item = el('div', {
+        workerCache[w.name] = w;
+        var item = el('div', {
           className: 'worker-item' + (selectedWorker === w.name ? ' selected' : ''),
           onClick: function() { selectWorker(w.name); }
         }, [
@@ -409,44 +410,66 @@
     ]);
   }
 
+  // Cache worker data from list poll so we can render instantly on click
+  var workerCache = {};
+
   async function selectWorker(name) {
     selectedWorker = name;
-    await refreshWorkers();
+    refreshWorkers();
 
-    const detail = $('#detailPanel');
+    var detail = $('#detailPanel');
     detail.replaceChildren();
 
-    const infoPanel = el('div', { className: 'worker-info', id: 'workerInfo' }, 'Loading...');
-    const logPanel = el('div', { className: 'log-panel', id: 'logOutput' }, 'Connecting...');
+    // Build the info panel immediately with cached data from worker list
+    var infoPanel = el('div', { className: 'worker-info', id: 'workerInfo' });
+    var cached = workerCache[name] || {};
+    infoPanel.appendChild(buildInfoItem('Name', cached.name || name));
+    infoPanel.appendChild(buildInfoItem('Status', cached.status || '...'));
+    infoPanel.appendChild(buildInfoItem('IP', cached.ip || '...'));
+    infoPanel.appendChild(buildInfoItem('Model', cached.model || '...'));
+    infoPanel.appendChild(buildInfoItem('VM Type', cached.vm_type || '...'));
+    infoPanel.appendChild(buildInfoItem('SKU', cached.instance_type || '...'));
+    infoPanel.appendChild(buildInfoItem('Tmux', '...'));
+    infoPanel.appendChild(buildInfoItem('Uptime', '...'));
 
-    const promptInput = el('input', { id: 'promptInput', placeholder: 'Send a prompt...' });
+    var logPanel = el('div', { className: 'log-panel', id: 'logOutput' }, 'Connecting...');
+
+    var promptInput = el('input', { id: 'promptInput', placeholder: 'Send a prompt...' });
     promptInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') sendPrompt(); });
 
-    const sendBtn = el('button', { className: 'btn', onClick: sendPrompt }, 'Send');
-    const killBtn = el('button', { className: 'btn btn-danger', onClick: killWorker }, 'Kill');
-    const promptBar = el('div', { className: 'prompt-bar' }, [promptInput, sendBtn, killBtn]);
+    var sendBtn = el('button', { className: 'btn', onClick: sendPrompt }, 'Send');
+    var killBtn = el('button', { className: 'btn btn-danger', onClick: killWorker }, 'Kill');
+    var promptBar = el('div', { className: 'prompt-bar' }, [promptInput, sendBtn, killBtn]);
 
     detail.appendChild(infoPanel);
     detail.appendChild(logPanel);
     detail.appendChild(promptBar);
 
-    // Fetch detail
-    try {
-      const info = await api('/workers/' + name);
-      infoPanel.replaceChildren();
-      infoPanel.appendChild(buildInfoItem('Name', info.name));
-      infoPanel.appendChild(buildInfoItem('Status', info.status));
-      infoPanel.appendChild(buildInfoItem('IP', info.ip));
-      infoPanel.appendChild(buildInfoItem('Model', info.model));
-      infoPanel.appendChild(buildInfoItem('VM Type', info.vm_type));
-      infoPanel.appendChild(buildInfoItem('SKU', info.instance_type));
-      infoPanel.appendChild(buildInfoItem('Tmux', info.tmux_alive ? 'alive' : 'dead'));
-      infoPanel.appendChild(buildInfoItem('Uptime', info.uptime));
-    } catch (e) {
-      infoPanel.textContent = e.message;
-    }
-
+    // Fire both in parallel — logs connect immediately, info fetches in background
     connectLogs(name);
+    fetchWorkerInfo(name);
+  }
+
+  async function fetchWorkerInfo(name) {
+    try {
+      var info = await api('/workers/' + name);
+      // Only update if still viewing this worker
+      if (selectedWorker !== name) return;
+      var panel = $('#workerInfo');
+      if (!panel) return;
+      panel.replaceChildren();
+      panel.appendChild(buildInfoItem('Name', info.name));
+      panel.appendChild(buildInfoItem('Status', info.idle ? 'idle' : info.status));
+      panel.appendChild(buildInfoItem('IP', info.ip));
+      panel.appendChild(buildInfoItem('Model', info.model));
+      panel.appendChild(buildInfoItem('VM Type', info.vm_type));
+      panel.appendChild(buildInfoItem('SKU', info.instance_type));
+      panel.appendChild(buildInfoItem('Tmux', info.tmux_alive ? 'alive' : 'dead'));
+      panel.appendChild(buildInfoItem('Uptime', info.uptime));
+    } catch (e) {
+      var panel = $('#workerInfo');
+      if (panel && selectedWorker === name) panel.textContent = e.message;
+    }
   }
 
   function connectLogs(name) {
@@ -556,11 +579,29 @@
   });
 
   // --- Polling ---
+  // Workers: state.json only changes on spawn/kill, so 15s is fine.
+  // Tasks: 3s while tasks are running, 30s when idle.
+
+  var hasActiveTasks = false;
+
+  var _origRefreshTasks = refreshTasks;
+  refreshTasks = async function() {
+    await _origRefreshTasks();
+    try {
+      var tasks = await api('/tasks');
+      hasActiveTasks = tasks.some(function(t) { return t.status === 'running'; });
+    } catch (e) {}
+  };
 
   refreshWorkers();
   refreshTasks();
-  setInterval(refreshWorkers, 5000);
-  setInterval(refreshTasks, 5000);
+  setInterval(refreshWorkers, 15000);
+
+  (function pollTasks() {
+    setTimeout(function() {
+      refreshTasks().then(pollTasks);
+    }, hasActiveTasks ? 3000 : 30000);
+  })();
 })();
 </script>
 </body>

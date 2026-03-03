@@ -24,9 +24,14 @@ from open_fleet.ssh import WorkerSSH
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-# Single-thread executor ensures only one FleetEngine call at a time.
-_executor = ThreadPoolExecutor(max_workers=1)
-_engine_lock = asyncio.Lock()
+# Mutating operations (spawn, kill, ask) serialize through this lock+executor
+# to protect state.json writes.  Read-only operations bypass it entirely.
+_write_executor = ThreadPoolExecutor(max_workers=1)
+_write_lock = asyncio.Lock()
+
+# Read-only SSH operations (logs, status checks) run in a separate pool so
+# they never block behind a spawn/kill and can run concurrently per worker.
+_read_executor = ThreadPoolExecutor(max_workers=8)
 
 # Background task registry: task_id -> TaskInfo
 _tasks: dict[str, TaskInfo] = {}
@@ -95,27 +100,47 @@ async def _verify_token(
 
 
 # ---------------------------------------------------------------------------
-# Engine helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-async def _run_engine(func, *args, **kwargs):
-    """Run a blocking FleetEngine call in the single-thread executor."""
-    async with _engine_lock:
+async def _run_write(func):
+    """Run a state-mutating FleetEngine call, serialized."""
+    async with _write_lock:
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(_executor, lambda: func(*args, **kwargs))
+        return await loop.run_in_executor(_write_executor, func)
 
 
-async def _run_background_task(task_id: str, func, *args, **kwargs):
+async def _run_read(func):
+    """Run a read-only SSH/state call in the concurrent read pool."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_read_executor, func)
+
+
+async def _run_background_task(task_id: str, func):
     """Run a long engine operation and update the task registry on completion."""
     try:
-        await _run_engine(func, *args, **kwargs)
+        await _run_write(func)
         _tasks[task_id].status = "completed"
     except Exception as e:
         _tasks[task_id].status = "failed"
         _tasks[task_id].error = str(e)
     finally:
         _tasks[task_id].finished_at = datetime.now(timezone.utc).isoformat()
+
+
+def _make_ssh(worker_name: str) -> WorkerSSH:
+    """Create a WorkerSSH for a given worker by reading state+config from disk."""
+    config = FleetConfig.load()
+    state = FleetState.load()
+    worker = state.get_worker(worker_name)
+    if not worker.ip:
+        raise ValueError(f"Worker '{worker_name}' has no IP yet")
+    return WorkerSSH(
+        ip=worker.ip,
+        user=config.cloud.ssh_user,
+        key_path=str(config.resolve_ssh_key()),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +152,8 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         yield
-        _executor.shutdown(wait=False)
+        _write_executor.shutdown(wait=False)
+        _read_executor.shutdown(wait=False)
 
     app = FastAPI(title="Open Fleet", version="0.1.0", lifespan=lifespan)
 
@@ -140,23 +166,67 @@ def create_app() -> FastAPI:
         return FileResponse(STATIC_DIR / "index.html")
 
     # ------------------------------------------------------------------
-    # Workers
+    # Workers — reads (no lock, concurrent via _read_executor)
     # ------------------------------------------------------------------
 
     @app.get("/api/workers")
     async def list_workers(request: Request):
         await _verify_token(request)
-        workers = await _run_engine(lambda: FleetEngine().list_workers())
-        return [w.model_dump() for w in workers]
+        # Pure file read — no SSH, no lock
+        state = FleetState.load()
+        return [w.model_dump() for w in state.workers.values()]
 
     @app.get("/api/workers/{name}")
     async def get_worker(name: str, request: Request):
         await _verify_token(request)
+
+        def _status():
+            config = FleetConfig.load()
+            state = FleetState.load()
+            worker = state.get_worker(name)
+            info = worker.model_dump()
+            if not worker.ip or worker.status in ("stopped", "spawning"):
+                info["tmux_alive"] = False
+                info["uptime"] = "N/A"
+                info["idle"] = False
+                return info
+            ssh = WorkerSSH(
+                ip=worker.ip,
+                user=config.cloud.ssh_user,
+                key_path=str(config.resolve_ssh_key()),
+            )
+            try:
+                # Single SSH command instead of 3 separate calls
+                combined = (
+                    "tmux has-session -t claude 2>/dev/null && echo TMUX_OK || echo TMUX_DEAD; "
+                    "uptime -p 2>/dev/null || echo unknown; "
+                    "tmux capture-pane -t claude:code -p -S -5 2>/dev/null"
+                )
+                stdout, _, _ = ssh.exec(combined)
+                lines = stdout.splitlines()
+                info["tmux_alive"] = len(lines) > 0 and lines[0] == "TMUX_OK"
+                info["uptime"] = lines[1].strip() if len(lines) > 1 else "unknown"
+                # Check remaining lines for idle prompt
+                pane_lines = [l.strip() for l in lines[2:] if l.strip()]
+                info["idle"] = any(
+                    l == "\u276f" or l.startswith("\u276f ") for l in pane_lines
+                )
+            except Exception:
+                info["tmux_alive"] = False
+                info["uptime"] = "unknown"
+                info["idle"] = False
+            finally:
+                ssh.close()
+            return info
+
         try:
-            info = await _run_engine(lambda: FleetEngine().status(name))
+            return await _run_read(_status)
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
-        return info
+
+    # ------------------------------------------------------------------
+    # Workers — writes (serialized via _write_lock)
+    # ------------------------------------------------------------------
 
     @app.post("/api/workers")
     async def spawn_worker(req: SpawnRequest, request: Request):
@@ -209,7 +279,7 @@ def create_app() -> FastAPI:
     async def ask_worker(name: str, req: AskRequest, request: Request):
         await _verify_token(request)
         try:
-            await _run_engine(
+            await _run_write(
                 lambda: FleetEngine().ask(name, req.prompt)
             )
         except KeyError as e:
@@ -217,71 +287,63 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     # ------------------------------------------------------------------
-    # Logs
+    # Logs — read-only, concurrent per-worker SSH
     # ------------------------------------------------------------------
 
     @app.get("/api/workers/{name}/logs/snapshot")
     async def log_snapshot(name: str, request: Request, lines: int = 100):
         await _verify_token(request)
+
+        def _read():
+            ssh = _make_ssh(name)
+            try:
+                return ssh.read_logs(lines)
+            finally:
+                ssh.close()
+
         try:
-            config = FleetConfig.load()
-            state = FleetState.load()
-            worker = state.get_worker(name)
-        except (FileNotFoundError, KeyError) as e:
+            output = await _run_read(_read)
+        except (KeyError, ValueError) as e:
             raise HTTPException(status_code=404, detail=str(e))
-
-        if not worker.ip:
-            raise HTTPException(status_code=400, detail="Worker has no IP yet")
-
-        ssh = WorkerSSH(
-            ip=worker.ip,
-            user=config.cloud.ssh_user,
-            key_path=str(config.resolve_ssh_key()),
-        )
-        try:
-            output = await asyncio.to_thread(ssh.read_logs, lines)
-        finally:
-            ssh.close()
         return {"lines": output}
 
     @app.get("/api/workers/{name}/logs")
     async def stream_logs(name: str, request: Request):
         await _verify_token(request)
 
+        # Validate worker exists before starting SSE
         try:
-            config = FleetConfig.load()
-            state = FleetState.load()
-            worker = state.get_worker(name)
-        except (FileNotFoundError, KeyError) as e:
+            ssh = _make_ssh(name)
+            ssh.close()
+        except (KeyError, ValueError) as e:
             raise HTTPException(status_code=404, detail=str(e))
 
-        if not worker.ip:
-            raise HTTPException(status_code=400, detail="Worker has no IP yet")
-
         async def event_generator() -> AsyncGenerator[dict, None]:
-            ssh = WorkerSSH(
-                ip=worker.ip,
-                user=config.cloud.ssh_user,
-                key_path=str(config.resolve_ssh_key()),
-            )
+            ssh = _make_ssh(name)
             seen_content = ""
             try:
                 while True:
                     try:
-                        output = await asyncio.to_thread(ssh.read_logs, 100)
+                        # Both calls reuse the same SSH connection
+                        output, is_idle = await _run_read(
+                            lambda: (ssh.read_logs(100), ssh.is_claude_idle())
+                        )
+
                         if output != seen_content:
                             seen_content = output
                             yield {"event": "logs", "data": json.dumps({"content": output})}
 
-                        is_idle = await asyncio.to_thread(ssh.is_claude_idle)
                         yield {
                             "event": "status",
                             "data": json.dumps({"idle": is_idle}),
                         }
                     except Exception as e:
                         yield {"event": "error", "data": json.dumps({"error": str(e)})}
+                        # Reconnect on SSH failure
+                        ssh.close()
+                        ssh = _make_ssh(name)
 
-                    await asyncio.sleep(3.0)
+                    await asyncio.sleep(2.0)
             finally:
                 ssh.close()
 
