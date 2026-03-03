@@ -12,7 +12,7 @@ class ProvisionError(Exception):
     pass
 
 
-# Path to the ansible directory shipped with open-fleet
+# Path to the ansible directory shipped with claude-fleet
 ANSIBLE_DIR = Path(__file__).parent.parent.parent / "ansible"
 
 

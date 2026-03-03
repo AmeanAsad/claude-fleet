@@ -7,10 +7,10 @@ from pathlib import Path
 
 from rich.console import Console
 
-from open_fleet.config import DEFAULT_SKUS, FleetConfig, FleetState, VMType, WorkerState
-from open_fleet.infra import InfraManager
-from open_fleet.provisioner import bootstrap_worker
-from open_fleet.ssh import WorkerSSH, wait_for_ssh
+from cfleet.config import DEFAULT_SKUS, FleetConfig, FleetState, VMType, WorkerState
+from cfleet.infra import InfraManager
+from cfleet.provisioner import bootstrap_worker
+from cfleet.ssh import WorkerSSH, wait_for_ssh
 
 console = Console()
 
@@ -38,8 +38,8 @@ class FleetEngine:
     # ------------------------------------------------------------------
 
     def init(self) -> None:
-        """Initialize ~/.fleet/ directory and Pulumi stack."""
-        from open_fleet.config import FLEET_DIR, CONFIG_PATH
+        """Initialize ~/.cfleet/ directory and Pulumi stack."""
+        from cfleet.config import FLEET_DIR, CONFIG_PATH
 
         FLEET_DIR.mkdir(parents=True, exist_ok=True)
         (FLEET_DIR / "skills").mkdir(exist_ok=True)
@@ -85,7 +85,7 @@ class FleetEngine:
         # Initialize Pulumi stack
         console.print("Initializing Pulumi stack...")
         self.infra.init_stack()
-        console.print("[green]Fleet initialized.[/green] Edit ~/.fleet/config.yml to configure.")
+        console.print("[green]Fleet initialized.[/green] Edit ~/.cfleet/config.yml to configure.")
 
     # ------------------------------------------------------------------
     # spawn

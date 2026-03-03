@@ -1,4 +1,4 @@
-# Open Fleet configuration
+# Claude Fleet configuration
 # Docs: see DESIGN.md for full schema
 
 # Anthropic auth — set this or use ANTHROPIC_API_KEY env var
@@ -7,8 +7,8 @@ anthropic_api_key: ""
 # Default model for workers
 model: claude-opus-4-6
 
-# Secrets env file — contents get written to ~/.fleet-env on each worker
-secrets_env: ~/.fleet/secrets.env
+# Secrets env file — contents get written to ~/.cfleet-env on each worker
+secrets_env: ~/.cfleet/secrets.env
 
 # Git repos — cloned read-only into every worker at /workspace/repos/<name>/
 repos: []
@@ -17,19 +17,19 @@ repos: []
   #   branch: main
 
 # Skills directory — copied to ~/.claude/skills/ on workers
-skills_dir: ~/.fleet/skills/
+skills_dir: ~/.cfleet/skills/
 
 # CLAUDE.md — copied to /workspace/CLAUDE.md on workers
-claude_md: ~/.fleet/CLAUDE.md
+claude_md: ~/.cfleet/CLAUDE.md
 
 # MCP servers config — copied to ~/.claude/mcp-servers.json on workers
-mcp_config: ~/.fleet/mcp-servers.json
+mcp_config: ~/.cfleet/mcp-servers.json
 
 # Pulumi config
 pulumi:
-  project: open-fleet
+  project: claude-fleet
   stack: default
-  backend: "file://~/.fleet/pulumi-state"
+  backend: "file://~/.cfleet/pulumi-state"
 
 # Cloud provider config
 cloud:

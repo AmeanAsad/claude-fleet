@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Open Fleet</title>
+<title>Claude Fleet</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -229,7 +229,7 @@
 <body>
 
 <header>
-  <h1>Open Fleet</h1>
+  <h1>Claude Fleet</h1>
   <div class="auth-section">
     <input id="tokenInput" type="password" placeholder="API token (if required)">
   </div>
@@ -301,14 +301,14 @@
   // --- Token ---
 
   function getToken() {
-    return localStorage.getItem('fleet_token') || $('#tokenInput').value || '';
+    return localStorage.getItem('cfleet_token') || $('#tokenInput').value || '';
   }
 
   $('#tokenInput').addEventListener('change', function(e) {
-    localStorage.setItem('fleet_token', e.target.value);
+    localStorage.setItem('cfleet_token', e.target.value);
   });
 
-  const saved = localStorage.getItem('fleet_token');
+  const saved = localStorage.getItem('cfleet_token');
   if (saved) $('#tokenInput').value = saved;
 
   // --- API helper ---

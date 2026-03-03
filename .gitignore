@@ -39,5 +39,8 @@ uv.lock
 # Claude Code
 .claude/
 
+# Plans (internal design docs)
+plans/
+
 # Unrelated local directories
 ansible-scripts/

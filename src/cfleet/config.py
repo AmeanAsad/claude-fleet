@@ -1,4 +1,4 @@
-"""Pydantic models for fleet config (~/.fleet/config.yml) and state (~/.fleet/state.json)."""
+"""Pydantic models for fleet config (~/.cfleet/config.yml) and state (~/.cfleet/state.json)."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ DEFAULT_SKUS: dict[VMType, str] = {
 }
 
 
-FLEET_DIR = Path.home() / ".fleet"
+FLEET_DIR = Path.home() / ".cfleet"
 CONFIG_PATH = FLEET_DIR / "config.yml"
 STATE_PATH = FLEET_DIR / "state.json"
 
@@ -75,19 +75,19 @@ class ApiConfig(BaseModel):
 
 
 class PulumiConfig(BaseModel):
-    project: str = "open-fleet"
+    project: str = "claude-fleet"
     stack: str = "default"
-    backend: str = "file://~/.fleet/pulumi-state"
+    backend: str = "file://~/.cfleet/pulumi-state"
 
 
 class FleetConfig(BaseModel):
     anthropic_api_key: str = ""
     model: str = "claude-opus-4-6"
-    secrets_env: str = "~/.fleet/secrets.env"
+    secrets_env: str = "~/.cfleet/secrets.env"
     repos: list[RepoConfig] = Field(default_factory=list)
-    skills_dir: str = "~/.fleet/skills/"
-    claude_md: str = "~/.fleet/CLAUDE.md"
-    mcp_config: str = "~/.fleet/mcp-servers.json"
+    skills_dir: str = "~/.cfleet/skills/"
+    claude_md: str = "~/.cfleet/CLAUDE.md"
+    mcp_config: str = "~/.cfleet/mcp-servers.json"
     pulumi: PulumiConfig = PulumiConfig()
     cloud: CloudConfig = CloudConfig()
     api: ApiConfig = ApiConfig()
@@ -96,7 +96,7 @@ class FleetConfig(BaseModel):
     def load(cls, path: Path | None = None) -> FleetConfig:
         p = path or CONFIG_PATH
         if not p.exists():
-            raise FileNotFoundError(f"Config not found at {p}. Run 'fleet init' first.")
+            raise FileNotFoundError(f"Config not found at {p}. Run 'cfleet init' first.")
         raw = yaml.safe_load(p.read_text()) or {}
         return cls.model_validate(raw)
 
@@ -158,7 +158,7 @@ class FleetState(BaseModel):
 
     def get_worker(self, name: str) -> WorkerState:
         if name not in self.workers:
-            raise KeyError(f"Worker '{name}' not found. Run 'fleet ls' to see workers.")
+            raise KeyError(f"Worker '{name}' not found. Run 'cfleet ls' to see workers.")
         return self.workers[name]
 
     def add_worker(self, worker: WorkerState) -> None:

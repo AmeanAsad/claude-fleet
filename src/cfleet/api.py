@@ -18,9 +18,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from open_fleet.config import FleetConfig, FleetState, VMType
-from open_fleet.engine import FleetEngine
-from open_fleet.ssh import WorkerSSH
+from cfleet.config import FleetConfig, FleetState, VMType
+from cfleet.engine import FleetEngine
+from cfleet.ssh import WorkerSSH
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -155,7 +155,7 @@ def create_app() -> FastAPI:
         _write_executor.shutdown(wait=False)
         _read_executor.shutdown(wait=False)
 
-    app = FastAPI(title="Open Fleet", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Claude Fleet", version="0.1.0", lifespan=lifespan)
 
     # ------------------------------------------------------------------
     # Dashboard

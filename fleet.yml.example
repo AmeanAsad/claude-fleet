@@ -1,8 +1,8 @@
-# Local fleet init config — copy to fleet.yml and fill in, then run `fleet init`
+# Local cfleet init config — copy to fleet.yml and fill in, then run `cfleet init`
 #
 #   cp fleet.yml.example fleet.yml
 #   # edit fleet.yml with your values
-#   fleet init
+#   cfleet init
 
 anthropic_api_key: "sk-ant-..."
 cloud:

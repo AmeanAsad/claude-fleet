@@ -1,4 +1,4 @@
-"""Pulumi program for Open Fleet worker VMs.
+"""Pulumi program for Claude Fleet worker VMs.
 
 Reads a 'workers' config map and creates one Azure VM per entry.
 Shared infrastructure (resource group, vnet, subnet, NSG) is created once
@@ -11,7 +11,7 @@ from pathlib import Path
 import pulumi
 import pulumi_azure_native as azure
 
-config = pulumi.Config("open-fleet")
+config = pulumi.Config("claude-fleet")
 
 workers_raw = config.get("workers") or "{}"
 workers = json.loads(workers_raw)

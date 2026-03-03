@@ -21,7 +21,7 @@ from textual.widgets import (
     Static,
 )
 
-from open_fleet.config import FleetConfig, FleetState, WorkerState
+from cfleet.config import FleetConfig, FleetState, WorkerState
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +187,7 @@ class PathDialog(ModalScreen[str | None]):
 class FleetTUI(App):
     """Three-panel TUI for managing fleet workers."""
 
-    TITLE = "Open Fleet"
+    TITLE = "Claude Fleet"
 
     CSS = """
     #main-layout {
@@ -374,7 +374,7 @@ class FleetTUI(App):
             log_widget.update("[dim]No logs available[/dim]")
             return
 
-        from open_fleet.ssh import WorkerSSH
+        from cfleet.ssh import WorkerSSH
 
         ssh = WorkerSSH(
             ip=worker.ip,
@@ -425,7 +425,7 @@ class FleetTUI(App):
 
     @work(thread=True)
     def _do_send_prompt(self, name: str, prompt: str) -> None:
-        from open_fleet.engine import FleetEngine
+        from cfleet.engine import FleetEngine
 
         try:
             engine = FleetEngine(config=self._config)
@@ -449,7 +449,7 @@ class FleetTUI(App):
 
     @work(thread=True)
     def _do_spawn(self, params: dict) -> None:
-        from open_fleet.engine import FleetEngine
+        from cfleet.engine import FleetEngine
 
         try:
             engine = FleetEngine(config=self._config)
@@ -478,7 +478,7 @@ class FleetTUI(App):
 
     @work(thread=True)
     def _do_kill(self, name: str) -> None:
-        from open_fleet.engine import FleetEngine
+        from cfleet.engine import FleetEngine
 
         try:
             engine = FleetEngine(config=self._config)
@@ -501,7 +501,7 @@ class FleetTUI(App):
             return
 
         # Suspend the TUI, attach via SSH, resume on detach
-        from open_fleet.ssh import WorkerSSH
+        from cfleet.ssh import WorkerSSH
 
         ssh_key = str(self._config.resolve_ssh_key()) if self._config else "~/.ssh/id_ed25519"
         ssh_user = self._config.cloud.ssh_user if self._config else "azureuser"
@@ -531,7 +531,7 @@ class FleetTUI(App):
 
     @work(thread=True)
     def _do_send_files(self, name: str, local_path: str) -> None:
-        from open_fleet.engine import FleetEngine
+        from cfleet.engine import FleetEngine
 
         try:
             engine = FleetEngine(config=self._config)
@@ -555,7 +555,7 @@ class FleetTUI(App):
 
     @work(thread=True)
     def _do_collect_files(self, name: str, local_dest: str) -> None:
-        from open_fleet.engine import FleetEngine
+        from cfleet.engine import FleetEngine
 
         try:
             engine = FleetEngine(config=self._config)

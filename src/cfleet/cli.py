@@ -1,4 +1,4 @@
-"""Typer CLI — all fleet commands."""
+"""Typer CLI — all cfleet commands."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 app = typer.Typer(
-    name="fleet",
+    name="cfleet",
     help="Orchestrate long-running Claude Code instances on cloud VMs.",
     no_args_is_help=True,
 )
@@ -18,12 +18,12 @@ console = Console()
 
 def _engine():
     """Lazy-load engine to avoid import overhead on --help."""
-    from open_fleet.engine import FleetEngine
+    from cfleet.engine import FleetEngine
     return FleetEngine()
 
 
 # --------------------------------------------------------------------------
-# fleet init
+# cfleetinit
 # --------------------------------------------------------------------------
 
 @app.command()
@@ -33,11 +33,11 @@ def init(
         help="Path to local fleet.yml init config (defaults to ./fleet.yml)",
     ),
 ):
-    """Create ~/.fleet/ directory with example config, CLAUDE.md, skills/. Initialize Pulumi stack."""
+    """Create ~/.cfleet/ directory with example config, CLAUDE.md, skills/. Initialize Pulumi stack."""
     import yaml as _yaml
     from pathlib import Path
-    from open_fleet.config import FleetConfig, FLEET_DIR, CONFIG_PATH
-    from open_fleet.engine import FleetEngine
+    from cfleet.config import FleetConfig, FLEET_DIR, CONFIG_PATH
+    from cfleet.engine import FleetEngine
 
     # init can run before config exists, so handle that
     try:
@@ -76,7 +76,7 @@ def init(
 
 
 # --------------------------------------------------------------------------
-# fleet spawn
+# cfleetspawn
 # --------------------------------------------------------------------------
 
 @app.command()
@@ -89,7 +89,7 @@ def spawn(
     region: Optional[str] = typer.Option(None, "--region", help="Override default region"),
 ):
     """Spawn a new fleet worker VM."""
-    from open_fleet.config import VMType
+    from cfleet.config import VMType
 
     resolved_vm_type = None
     if vm_type:
@@ -111,7 +111,7 @@ def spawn(
 
 
 # --------------------------------------------------------------------------
-# fleet ls
+# cfleetls
 # --------------------------------------------------------------------------
 
 @app.command(name="ls")
@@ -121,12 +121,12 @@ def list_workers():
     workers = engine.list_workers()
 
     if not workers:
-        console.print("No workers. Run [bold]fleet spawn <name>[/bold] to create one.")
+        console.print("No workers. Run [bold]cfleet spawn <name>[/bold] to create one.")
         return
 
     # Live-check workers that claim to be "working" — update to idle if Claude
     # Code is actually at its prompt.
-    from open_fleet.ssh import WorkerSSH
+    from cfleet.ssh import WorkerSSH
 
     state_dirty = False
     for w in workers:
@@ -188,7 +188,7 @@ def list_workers():
 
 
 # --------------------------------------------------------------------------
-# fleet ask
+# cfleetask
 # --------------------------------------------------------------------------
 
 @app.command()
@@ -202,7 +202,7 @@ def ask(
 
 
 # --------------------------------------------------------------------------
-# fleet attach
+# cfleetattach
 # --------------------------------------------------------------------------
 
 @app.command()
@@ -215,7 +215,7 @@ def attach(
 
 
 # --------------------------------------------------------------------------
-# fleet send
+# cfleetsend
 # --------------------------------------------------------------------------
 
 @app.command()
@@ -230,7 +230,7 @@ def send(
 
 
 # --------------------------------------------------------------------------
-# fleet collect
+# cfleetcollect
 # --------------------------------------------------------------------------
 
 @app.command()
@@ -245,7 +245,7 @@ def collect(
 
 
 # --------------------------------------------------------------------------
-# fleet logs
+# cfleetlogs
 # --------------------------------------------------------------------------
 
 @app.command()
@@ -260,7 +260,7 @@ def logs(
 
 
 # --------------------------------------------------------------------------
-# fleet status
+# cfleetstatus
 # --------------------------------------------------------------------------
 
 @app.command()
@@ -289,7 +289,7 @@ def status(
 
 
 # --------------------------------------------------------------------------
-# fleet kill
+# cfleetkill
 # --------------------------------------------------------------------------
 
 @app.command()
@@ -312,7 +312,7 @@ def kill(
 
 
 # --------------------------------------------------------------------------
-# fleet serve
+# cfleetserve
 # --------------------------------------------------------------------------
 
 @app.command()
@@ -322,19 +322,19 @@ def serve(
 ):
     """Start the fleet web dashboard."""
     import uvicorn
-    from open_fleet.api import create_app
+    from cfleet.api import create_app
 
-    console.print(f"Fleet dashboard at [bold]http://{host}:{port}[/bold]")
+    console.print(f"Claude Fleet dashboard at [bold]http://{host}:{port}[/bold]")
     uvicorn.run(create_app(), host=host, port=port)
 
 
 # --------------------------------------------------------------------------
-# fleet tui
+# cfleettui
 # --------------------------------------------------------------------------
 
 @app.command()
 def tui():
     """Launch the interactive TUI."""
-    from open_fleet.tui import FleetTUI
+    from cfleet.tui import FleetTUI
     app_tui = FleetTUI()
     app_tui.run()

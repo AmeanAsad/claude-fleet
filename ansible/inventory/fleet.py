@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic Ansible inventory script that reads ~/.fleet/state.json.
+"""Dynamic Ansible inventory script that reads ~/.cfleet/state.json.
 
 Generates Ansible-compatible JSON inventory grouped by worker status.
 Usage:
@@ -10,7 +10,7 @@ import json
 import sys
 from pathlib import Path
 
-STATE_PATH = Path.home() / ".fleet" / "state.json"
+STATE_PATH = Path.home() / ".cfleet" / "state.json"
 
 
 def main():

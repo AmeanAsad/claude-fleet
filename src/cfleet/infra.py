@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pulumi import automation as auto
 
-from open_fleet.config import FleetConfig
+from cfleet.config import FleetConfig
 
 
 class CloudProvider(ABC):
@@ -119,24 +119,24 @@ class InfraManager:
         stack = self._get_stack()
         # Set empty workers map if not present
         try:
-            stack.get_config("open-fleet:workers")
+            stack.get_config("claude-fleet:workers")
         except auto.errors.CommandError:
             stack.set_config(
-                "open-fleet:workers", auto.ConfigValue(value=json.dumps({}))
+                "claude-fleet:workers", auto.ConfigValue(value=json.dumps({}))
             )
 
     def add_worker(self, name: str, worker_cfg: dict) -> dict:
         """Add a worker to the Pulumi config and run up. Returns outputs."""
         stack = self._get_stack()
         try:
-            workers_raw = stack.get_config("open-fleet:workers")
+            workers_raw = stack.get_config("claude-fleet:workers")
             workers = json.loads(workers_raw.value)
         except (auto.errors.CommandError, KeyError):
             workers = {}
 
         workers[name] = worker_cfg
         stack.set_config(
-            "open-fleet:workers", auto.ConfigValue(value=json.dumps(workers))
+            "claude-fleet:workers", auto.ConfigValue(value=json.dumps(workers))
         )
 
         # Set azure-specific config for the Pulumi program
@@ -150,7 +150,7 @@ class InfraManager:
             "image": azure.image.model_dump(),
         }
         stack.set_config(
-            "open-fleet:azure", auto.ConfigValue(value=json.dumps(azure_cfg))
+            "claude-fleet:azure", auto.ConfigValue(value=json.dumps(azure_cfg))
         )
 
         result = stack.up(on_output=lambda msg: None)
@@ -160,14 +160,14 @@ class InfraManager:
         """Remove a worker from the Pulumi config and run up to destroy it."""
         stack = self._get_stack()
         try:
-            workers_raw = stack.get_config("open-fleet:workers")
+            workers_raw = stack.get_config("claude-fleet:workers")
             workers = json.loads(workers_raw.value)
         except (auto.errors.CommandError, KeyError):
             return
 
         workers.pop(name, None)
         stack.set_config(
-            "open-fleet:workers", auto.ConfigValue(value=json.dumps(workers))
+            "claude-fleet:workers", auto.ConfigValue(value=json.dumps(workers))
         )
 
         stack.up(on_output=lambda msg: None)
@@ -176,6 +176,6 @@ class InfraManager:
         """Destroy all infrastructure."""
         stack = self._get_stack()
         stack.set_config(
-            "open-fleet:workers", auto.ConfigValue(value=json.dumps({}))
+            "claude-fleet:workers", auto.ConfigValue(value=json.dumps({}))
         )
         stack.up(on_output=lambda msg: None)
