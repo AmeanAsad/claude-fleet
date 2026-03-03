@@ -68,6 +68,12 @@ class CloudConfig(BaseModel):
     azure: AzureConfig = AzureConfig()
 
 
+class ApiConfig(BaseModel):
+    host: str = "0.0.0.0"
+    port: int = 8420
+    token: str = ""  # empty = no auth
+
+
 class PulumiConfig(BaseModel):
     project: str = "open-fleet"
     stack: str = "default"
@@ -84,6 +90,7 @@ class FleetConfig(BaseModel):
     mcp_config: str = "~/.fleet/mcp-servers.json"
     pulumi: PulumiConfig = PulumiConfig()
     cloud: CloudConfig = CloudConfig()
+    api: ApiConfig = ApiConfig()
 
     @classmethod
     def load(cls, path: Path | None = None) -> FleetConfig:

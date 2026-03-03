@@ -34,6 +34,8 @@ No custom daemons on workers. No agent protocols. Just SSH + tmux + rsync.
 - **Git safety**: Workers get read-only repo clones with push disabled
 - **Skills & config**: Your `CLAUDE.md`, MCP servers, and skills are synced to every worker
 - **Interactive TUI**: Three-panel interface for managing workers, streaming logs, and sending prompts
+- **Web dashboard**: Control your fleet from a browser or phone via `fleet serve`
+- **REST API**: Programmatic access to all fleet operations with SSE log streaming
 - **File exchange**: `fleet send` / `fleet collect` via rsync with `.gitignore` filtering
 
 ## Prerequisites
@@ -103,6 +105,7 @@ fleet kill my-worker
 | `fleet collect <name> <dest>` | rsync worker's `/workspace/` to local             |
 | `fleet kill <name>`           | Destroy worker VM                                 |
 | `fleet kill --all`            | Destroy all worker VMs                            |
+| `fleet serve`                 | Start web dashboard (browser/phone control)       |
 | `fleet tui`                   | Launch interactive TUI                            |
 
 ### Spawn options
@@ -141,6 +144,64 @@ fleet spawn my-worker \
 ```
 
 **Keybindings**: `s` spawn, `k` kill, `a` attach, `f` send files, `c` collect files, `q` quit
+
+## Web Dashboard
+
+`fleet serve` starts a web server you can access from your browser or phone.
+
+```bash
+fleet serve                              # http://localhost:8420
+fleet serve --port 9000                  # custom port
+FLEET_API_TOKEN=secret fleet serve       # with authentication
+```
+
+The dashboard provides the same controls as the TUI: view workers, stream logs, send prompts, spawn and kill workers.
+
+### REST API
+
+All endpoints are under `/api/`. Authentication is via `Authorization: Bearer <token>` header (or `?token=` query param for SSE).
+
+| Method   | Path                              | Description                          |
+| -------- | --------------------------------- | ------------------------------------ |
+| `GET`    | `/api/workers`                    | List all workers                     |
+| `GET`    | `/api/workers/{name}`             | Worker detail (IP, status, uptime)   |
+| `POST`   | `/api/workers`                    | Spawn a worker (background task)     |
+| `DELETE` | `/api/workers/{name}`             | Kill a worker (background task)      |
+| `POST`   | `/api/workers/{name}/ask`         | Send a prompt                        |
+| `GET`    | `/api/workers/{name}/logs`        | Stream logs (SSE)                    |
+| `GET`    | `/api/workers/{name}/logs/snapshot` | Fetch last N lines                 |
+| `GET`    | `/api/tasks`                      | List background tasks                |
+| `GET`    | `/api/tasks/{id}`                 | Get task status                      |
+
+**Spawn** request body:
+```json
+{"name": "my-worker", "vm_type": "snp", "model": "claude-opus-4-6"}
+```
+
+**Ask** request body:
+```json
+{"prompt": "Build an OAuth login flow"}
+```
+
+**Log streaming** uses Server-Sent Events. Connect with `EventSource`:
+```javascript
+const src = new EventSource('/api/workers/my-worker/logs?token=...');
+src.addEventListener('logs', (e) => console.log(JSON.parse(e.data).content));
+src.addEventListener('status', (e) => console.log(JSON.parse(e.data).idle));
+```
+
+**Spawn/kill** are long-running operations that return a `task_id` immediately. Poll `/api/tasks/{id}` to check progress.
+
+### API config
+
+Add to `~/.fleet/config.yml`:
+
+```yaml
+api:
+  host: 0.0.0.0
+  port: 8420
+  token: ""          # empty = no auth; or set FLEET_API_TOKEN env var
+```
 
 ## Configuration
 
@@ -211,7 +272,7 @@ MCP server config copied to `~/.claude/mcp-servers.json` on workers.
 ## Architecture
 
 ```
-fleet CLI / TUI
+fleet CLI / TUI / Web API
       │
       ▼
 Fleet Engine (engine.py)

@@ -312,6 +312,23 @@ def kill(
 
 
 # --------------------------------------------------------------------------
+# fleet serve
+# --------------------------------------------------------------------------
+
+@app.command()
+def serve(
+    host: str = typer.Option("0.0.0.0", "--host", "-H", help="Bind address"),
+    port: int = typer.Option(8420, "--port", "-p", help="Port"),
+):
+    """Start the fleet web dashboard."""
+    import uvicorn
+    from open_fleet.api import create_app
+
+    console.print(f"Fleet dashboard at [bold]http://{host}:{port}[/bold]")
+    uvicorn.run(create_app(), host=host, port=port)
+
+
+# --------------------------------------------------------------------------
 # fleet tui
 # --------------------------------------------------------------------------
 

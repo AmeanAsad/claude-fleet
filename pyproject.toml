@@ -14,6 +14,9 @@ dependencies = [
     "pulumi-azure-native",
     "ansible-runner",
     "watchfiles",
+    "fastapi",
+    "uvicorn[standard]",
+    "sse-starlette",
 ]
 
 [project.scripts]
