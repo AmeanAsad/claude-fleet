@@ -1,0 +1,10 @@
+{
+  "model": "{{ claude_model }}",
+  "alwaysThinkingEnabled": true,
+  "skipDangerousModePermissionPrompt": true,
+  "apiKeyHelper": "echo {{ anthropic_api_key }}",
+  "effortLevel": "high",
+  "permissions": {
+    "allow": ["Read", "Write", "Edit", "MultiEdit", "Bash(*)", "WebFetch"]
+  }
+}

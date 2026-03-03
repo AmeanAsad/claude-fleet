@@ -1,0 +1,42 @@
+---
+# Bootstrap a fleet worker VM.
+# Called by fleet engine via ansible-runner against a single worker IP.
+- name: Bootstrap fleet worker
+  hosts: "{{ target_host | default('all') }}"
+  become: true
+  vars:
+    workspace_dir: "{{ workspace_dir | default('/workspace') }}"
+    anthropic_api_key: "{{ anthropic_api_key | default('') }}"
+    claude_model: "{{ model | default('claude-sonnet-4-5-20250514') }}"
+    ssh_user: "{{ ansible_user | default('azureuser') }}"
+
+  tasks:
+    - name: Include base role
+      ansible.builtin.include_role:
+        name: base
+
+    - name: Include claude_code role
+      ansible.builtin.include_role:
+        name: claude_code
+
+    - name: Include workspace role
+      ansible.builtin.include_role:
+        name: workspace
+
+    - name: Include repos role
+      ansible.builtin.include_role:
+        name: repos
+      when: repos is defined and repos | length > 0
+
+    - name: Include skills role
+      ansible.builtin.include_role:
+        name: skills
+
+    - name: Include secrets role
+      ansible.builtin.include_role:
+        name: secrets
+      when: secrets_env_path is defined
+
+    - name: Include claude_start role
+      ansible.builtin.include_role:
+        name: claude_start

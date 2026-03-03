@@ -1,0 +1,30 @@
+---
+# Clone git repos read-only. Push is disabled via remote URL rewrite and a
+# pre-push hook that always fails.
+
+- name: Clone repos
+  ansible.builtin.git:
+    repo: "{{ item.url }}"
+    dest: "{{ workspace_dir }}/repos/{{ item.name }}"
+    version: "{{ item.branch | default('main') }}"
+    depth: 1
+    single_branch: true
+  loop: "{{ repos }}"
+  become: true
+  become_user: "{{ ssh_user }}"
+
+- name: Disable push on all repos
+  ansible.builtin.shell: |
+    cd {{ workspace_dir }}/repos/{{ item.name }}
+    git remote set-url --push origin no_push_allowed
+    mkdir -p .git/hooks
+    cat > .git/hooks/pre-push << 'HOOK'
+    #!/bin/sh
+    echo "Push disabled on fleet workers"
+    exit 1
+    HOOK
+    chmod +x .git/hooks/pre-push
+  loop: "{{ repos }}"
+  become: true
+  become_user: "{{ ssh_user }}"
+  changed_when: true

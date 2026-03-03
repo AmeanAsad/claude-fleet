@@ -1,0 +1,26 @@
+---
+# Copy skills directory, CLAUDE.md, and MCP config to the worker.
+
+- name: Copy skills directory
+  ansible.builtin.copy:
+    src: "{{ skills_dir }}/"
+    dest: "/home/{{ ssh_user }}/.claude/skills/"
+    owner: "{{ ssh_user }}"
+    mode: "0644"
+  when: skills_dir is defined and skills_dir | length > 0
+
+- name: Copy CLAUDE.md to workspace
+  ansible.builtin.copy:
+    src: "{{ claude_md_path }}"
+    dest: "{{ workspace_dir }}/CLAUDE.md"
+    owner: "{{ ssh_user }}"
+    mode: "0644"
+  when: claude_md_path is defined
+
+- name: Copy MCP servers config
+  ansible.builtin.copy:
+    src: "{{ mcp_config_path }}"
+    dest: "/home/{{ ssh_user }}/.claude/mcp-servers.json"
+    owner: "{{ ssh_user }}"
+    mode: "0600"
+  when: mcp_config_path is defined

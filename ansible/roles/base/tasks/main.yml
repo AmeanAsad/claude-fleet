@@ -1,0 +1,48 @@
+---
+# System dependencies — adapted from claude-dev reference role.
+# Installs everything needed for Claude Code to work on a fresh Ubuntu 24.04 VM.
+
+- name: Install system packages
+  ansible.builtin.apt:
+    name:
+      - git
+      - curl
+      - rsync
+      - build-essential
+      - tmux
+      - ripgrep
+      - fd-find
+      - jq
+      - wget
+      - unzip
+      - libssl-dev
+      - pkg-config
+    state: present
+    update_cache: true
+  become: true
+
+# Node.js — Claude Code needs it for npm-based MCP servers
+- name: Check if Node.js is installed
+  ansible.builtin.command: node --version
+  register: node_check
+  changed_when: false
+  failed_when: false
+
+- name: Install Node.js 22.x
+  when: node_check.rc != 0
+  block:
+    - name: Download NodeSource setup script
+      ansible.builtin.get_url:
+        url: https://deb.nodesource.com/setup_22.x
+        dest: /tmp/nodesource_setup.sh
+        mode: "0755"
+
+    - name: Run NodeSource setup
+      ansible.builtin.command: bash /tmp/nodesource_setup.sh
+      become: true
+
+    - name: Install Node.js
+      ansible.builtin.apt:
+        name: nodejs
+        state: present
+      become: true

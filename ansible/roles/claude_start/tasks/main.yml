@@ -1,0 +1,28 @@
+---
+# Start a tmux session with Claude Code running inside it.
+# The session is named "claude" and starts in /workspace.
+
+- name: Check if tmux session already exists
+  ansible.builtin.shell: tmux has-session -t claude 2>/dev/null
+  register: tmux_check
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: "{{ ssh_user }}"
+
+- name: Start tmux session with Claude Code and bash windows
+  ansible.builtin.shell: |
+    tmux new-session -d -s claude -n code -c {{ workspace_dir }}
+    tmux send-keys -t claude:code 'source ~/.fleet-env 2>/dev/null; source ~/.bashrc; claude --model {{ claude_model }} --dangerously-skip-permissions' Enter
+    # Wait for Claude Code to start, then auto-accept trust dialog if it appears
+    sleep 8
+    tmux send-keys -t claude:code Enter
+    sleep 2
+    tmux send-keys -t claude:code Enter
+    # Create bash window
+    tmux new-window -t claude -n bash -c {{ workspace_dir }}
+    tmux send-keys -t claude:bash 'source ~/.fleet-env 2>/dev/null; source ~/.bashrc' Enter
+    tmux select-window -t claude:code
+  become: true
+  become_user: "{{ ssh_user }}"
+  when: tmux_check.rc != 0

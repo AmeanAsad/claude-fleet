@@ -1,0 +1,107 @@
+---
+# Install Claude Code CLI and configure authentication.
+# Adapted from the claude-dev reference role — uses the official install script.
+
+- name: Validate API key is configured
+  ansible.builtin.fail:
+    msg: "Anthropic API key not provided. Set anthropic_api_key in fleet config."
+  when: anthropic_api_key is not defined or anthropic_api_key | length == 0
+
+- name: Check if Claude Code is installed
+  ansible.builtin.stat:
+    path: "/home/{{ ssh_user }}/.local/bin/claude"
+  register: claude_binary
+
+- name: Install Claude Code CLI
+  ansible.builtin.shell: |
+    curl -fsSL https://claude.ai/install.sh | bash
+  args:
+    creates: "/home/{{ ssh_user }}/.local/bin/claude"
+  become: true
+  become_user: "{{ ssh_user }}"
+  when: not claude_binary.stat.exists
+
+- name: Verify Claude Code installation
+  ansible.builtin.command: "/home/{{ ssh_user }}/.local/bin/claude --version"
+  register: claude_version
+  changed_when: false
+  become: true
+  become_user: "{{ ssh_user }}"
+
+- name: Display Claude Code version
+  ansible.builtin.debug:
+    msg: "Claude Code installed: {{ claude_version.stdout }}"
+
+# Configure Claude Code settings
+- name: Create Claude config directory
+  ansible.builtin.file:
+    path: "/home/{{ ssh_user }}/.claude"
+    state: directory
+    owner: "{{ ssh_user }}"
+    mode: "0700"
+
+- name: Deploy Claude Code settings
+  ansible.builtin.template:
+    src: claude-settings.json.j2
+    dest: "/home/{{ ssh_user }}/.claude/settings.json"
+    owner: "{{ ssh_user }}"
+    mode: "0600"
+
+# Skip ALL first-run prompts:
+# 1. ~/.claude.json — global onboarding (theme, login, terms)
+# 2. ~/.claude/claude.json — trust dialogs
+# 3. git init in /workspace — skips directory trust prompt (only shows for non-git dirs)
+# 4. skipDangerousModePermissionPrompt in settings.json — skips bypass permissions confirm
+# 5. CLAUDE_CODE_API_KEY env var — skips interactive auth
+
+- name: Pre-accept onboarding and workspace trust in ~/.claude.json
+  ansible.builtin.copy:
+    content: |
+      {
+        "hasCompletedOnboarding": true,
+        "hasAcknowledgedDisclaimer": true,
+        "effortCalloutDismissed": true,
+        "projects": {
+          "/workspace": {
+            "hasTrustDialogAccepted": true,
+            "allowedTools": []
+          },
+          "/home/{{ ssh_user }}": {
+            "hasTrustDialogAccepted": true,
+            "allowedTools": []
+          }
+        }
+      }
+    dest: "/home/{{ ssh_user }}/.claude.json"
+    owner: "{{ ssh_user }}"
+    mode: "0600"
+
+- name: Pre-accept trust dialogs in ~/.claude/claude.json
+  ansible.builtin.copy:
+    content: |
+      {
+        "hasCompletedOnboarding": true,
+        "hasTrustDialogAccepted": true,
+        "hasTrustDialogHooksAccepted": true,
+        "hasCompletedProjectOnboarding": true
+      }
+    dest: "/home/{{ ssh_user }}/.claude/claude.json"
+    owner: "{{ ssh_user }}"
+    mode: "0600"
+
+- name: Set CLAUDE_CODE_API_KEY for headless auth
+  ansible.builtin.lineinfile:
+    path: "/home/{{ ssh_user }}/.bashrc"
+    line: 'export CLAUDE_CODE_API_KEY="{{ anthropic_api_key }}"'
+    state: present
+  become: true
+  become_user: "{{ ssh_user }}"
+
+# Add Claude Code to PATH
+- name: Add Claude Code to PATH in bashrc
+  ansible.builtin.lineinfile:
+    path: "/home/{{ ssh_user }}/.bashrc"
+    line: 'export PATH="/home/{{ ssh_user }}/.local/bin:$PATH"'
+    state: present
+  become: true
+  become_user: "{{ ssh_user }}"

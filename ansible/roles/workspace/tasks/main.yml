@@ -1,0 +1,29 @@
+---
+# Create /workspace directory structure.
+# /workspace/repos/ — read-only repo clones
+# /workspace/inbox/ — files sent from host via fleet send
+# /workspace/outbox/ — files to collect via fleet collect
+
+- name: Create workspace directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ssh_user }}"
+    group: "{{ ssh_user }}"
+    mode: "0755"
+  loop:
+    - "{{ workspace_dir }}"
+    - "{{ workspace_dir }}/repos"
+    - "{{ workspace_dir }}/inbox"
+    - "{{ workspace_dir }}/outbox"
+  become: true
+
+# Git init /workspace so Claude Code skips the directory trust prompt
+# (trust prompt only appears for non-git directories)
+- name: Initialize git repo in workspace
+  ansible.builtin.command:
+    cmd: git init
+    chdir: "{{ workspace_dir }}"
+    creates: "{{ workspace_dir }}/.git"
+  become: true
+  become_user: "{{ ssh_user }}"
