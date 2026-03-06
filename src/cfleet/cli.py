@@ -71,6 +71,13 @@ def init(
         sub_id = typer.prompt("Azure subscription ID")
         config.cloud.azure.subscription_id = sub_id
 
+    # Generate unique resource group name if not set
+    if not config.cloud.azure.resource_group:
+        import secrets as _secrets
+        slug = _secrets.token_hex(3)  # 6 hex chars
+        config.cloud.azure.resource_group = f"{slug}-fleet-workers"
+        console.print(f"Resource group: [bold]{config.cloud.azure.resource_group}[/bold]")
+
     engine = FleetEngine(config=config)
     engine.init()
 
@@ -237,7 +244,7 @@ def send(
 def collect(
     name: str = typer.Argument(..., help="Worker name"),
     local_dest: str = typer.Argument(..., help="Local destination path"),
-    path: str = typer.Option("/workspace/", "--path", help="Remote path to collect"),
+    path: str = typer.Option("/workspace/outbox/", "--path", help="Remote path to collect"),
 ):
     """Collect files from a worker via rsync."""
     engine = _engine()

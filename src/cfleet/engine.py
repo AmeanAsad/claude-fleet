@@ -98,10 +98,12 @@ class FleetEngine:
             missing.append("anthropic_api_key")
         if not self.config.cloud.azure.subscription_id:
             missing.append("cloud.azure.subscription_id")
+        if not self.config.cloud.azure.resource_group:
+            missing.append("cloud.azure.resource_group")
         if missing:
             raise ValueError(
                 f"Missing required config: {', '.join(missing)}. "
-                "Run 'fleet init' to set them."
+                "Run 'cfleet init' to set them."
             )
 
     def spawn(
@@ -261,7 +263,7 @@ class FleetEngine:
         ssh.close()
         console.print(f"Sent {local_path} to [bold]{name}[/bold]:{remote_path}")
 
-    def collect(self, name: str, local_dest: str, remote_path: str = "/workspace/") -> None:
+    def collect(self, name: str, local_dest: str, remote_path: str = "/workspace/outbox/") -> None:
         """Collect files from a worker."""
         worker = self.state.get_worker(name)
         ssh = self._get_ssh(worker)

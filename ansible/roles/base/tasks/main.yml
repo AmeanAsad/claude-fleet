@@ -21,6 +21,16 @@
     update_cache: true
   become: true
 
+- name: Configure tmux (mouse scroll, larger scrollback)
+  ansible.builtin.copy:
+    dest: "/home/{{ ansible_user }}/.tmux.conf"
+    owner: "{{ ansible_user }}"
+    mode: "0644"
+    content: |
+      set -g mouse on
+      set -g history-limit 50000
+  become: true
+
 # Node.js — Claude Code needs it for npm-based MCP servers
 - name: Check if Node.js is installed
   ansible.builtin.command: node --version

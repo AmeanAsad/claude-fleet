@@ -52,7 +52,7 @@ class AzureImageConfig(BaseModel):
 
 class AzureConfig(BaseModel):
     subscription_id: str = ""
-    resource_group: str = "fleet-workers"
+    resource_group: str = ""  # generated with unique slug during init
     image: AzureImageConfig = AzureImageConfig()
     vnet: Optional[str] = None
     subnet: Optional[str] = None
