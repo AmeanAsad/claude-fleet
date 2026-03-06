@@ -1,302 +1,72 @@
 # Claude Fleet
 
-CLI + TUI for orchestrating long-running Claude Code instances on cloud VMs.
-
-Spawn workers, hand them tasks, send them files, and collect results. Each worker is an isolated Azure VM with Claude Code running persistently in tmux, pre-loaded with your skills, config, and read-only copies of your repos.
-
-## How it works
-
-```
-You (host)                          Cloud VMs (workers)
-───────────                         ───────────────────
-cfleet spawn "auth-worker"    →      Azure VM boots, Ansible provisions,
-                                     Claude Code starts in tmux
-
-cfleet ask auth-worker "..."  →      Prompt injected into Claude Code via SSH
-
-cfleet logs auth-worker       ←      tmux scrollback captured via SSH
-
-cfleet attach auth-worker     ↔      Interactive tmux session over SSH
-
-cfleet send auth-worker ./src →      rsync files to /workspace/inbox/
-
-cfleet collect auth-worker .  ←      rsync files from /workspace/
-
-cfleet kill auth-worker       →      Pulumi destroys the VM
-```
-
-No custom daemons on workers. No agent protocols. Just SSH + tmux + rsync.
-
-## Features
-
-- **Confidential VMs**: First-class support for AMD SEV-SNP and Intel TDX via `--vm-type snp|tdx`
-- **Fire and forget**: Send a prompt, check back later. Workers run autonomously
-- **Git safety**: Workers get read-only repo clones with push disabled
-- **Skills & config**: Your `CLAUDE.md`, MCP servers, and skills are synced to every worker
-- **Interactive TUI**: Three-panel interface for managing workers, streaming logs, and sending prompts
-- **Web dashboard**: Control your fleet from a browser or phone via `cfleet serve`
-- **REST API**: Programmatic access to all fleet operations with SSE log streaming
-- **File exchange**: `cfleet send` / `cfleet collect` via rsync with `.gitignore` filtering
+CLI for orchestrating long-running Claude Code instances on Azure VMs. Spawn workers, send prompts, collect results — all over SSH + tmux + rsync.
 
 ## Prerequisites
 
-- Python 3.11+
-- [Pulumi CLI](https://www.pulumi.com/docs/install/)
-- Azure CLI (`az login` done)
-- An Azure subscription
-- SSH key pair (`~/.ssh/id_ed25519`)
-- `rsync` installed locally
+- Python 3.11+, [Pulumi CLI](https://www.pulumi.com/docs/install/), Azure CLI (`az login`), SSH key (`~/.ssh/id_ed25519`), `rsync`
 
 ## Install
 
 ```bash
-# Clone and install
 git clone https://github.com/AmeanAsad/claude-fleet.git
 cd claude-fleet
 pip install -e .
-
-# Or with uv
-uv pip install -e .
 ```
 
 ## Quick start
 
 ```bash
-# 1. Create your config
-cp fleet.yml.example fleet.yml
-# Edit fleet.yml with your Anthropic API key and Azure subscription ID
-
-# 2. Initialize fleet (creates ~/.cfleet/, sets up Pulumi stack)
+# Configure and initialize
+cp fleet.yml.example fleet.yml   # add API key + Azure subscription ID
 cfleet init
 
-# 3. Spawn a worker
-cfleet spawn my-worker                        # regular VM
-cfleet spawn my-worker --vm-type snp          # confidential VM (AMD SEV-SNP)
-
-# 4. Send it work
-cfleet ask my-worker "Build an OAuth login flow for the Express app in /workspace/repos/myapp"
-
-# 5. Check on it
+# Spawn, use, destroy
+cfleet spawn my-worker
+cfleet ask my-worker "Build an OAuth login flow"
 cfleet logs my-worker
-cfleet ls
-
-# 6. Attach interactively (Ctrl+B d to detach)
-cfleet attach my-worker
-
-# 7. Collect results
-cfleet collect my-worker ./output
-
-# 8. Done — destroy the VM
 cfleet kill my-worker
 ```
 
-## CLI reference
+## Commands
 
-| Command                        | Description                                        |
-| ------------------------------ | -------------------------------------------------- |
-| `cfleet init`                  | Create `~/.cfleet/` directory, set up Pulumi stack |
-| `cfleet spawn <name>`          | Create a new worker VM                             |
-| `cfleet ls`                    | List all workers with status                       |
-| `cfleet ask <name> "<prompt>"` | Send a prompt to a worker (fire and forget)        |
-| `cfleet attach <name>`         | SSH into worker's tmux session                     |
-| `cfleet logs <name> [-f]`      | Show/stream worker's Claude Code output            |
-| `cfleet status <name>`         | Detailed worker info (IP, uptime, tmux status)     |
-| `cfleet send <name> <path>`    | rsync files to worker's `/workspace/inbox/`        |
-| `cfleet collect <name> <dest>` | rsync worker's `/workspace/` to local              |
-| `cfleet kill <name>`           | Destroy worker VM                                  |
-| `cfleet kill --all`            | Destroy all worker VMs                             |
-| `cfleet serve`                 | Start web dashboard (browser/phone control)        |
-| `cfleet tui`                   | Launch interactive TUI                             |
+| Command | Description |
+|---|---|
+| `cfleet init` | Set up `~/.cfleet/` and Pulumi stack |
+| `cfleet spawn <name>` | Create a worker VM |
+| `cfleet ls` | List all workers |
+| `cfleet ask <name> "<prompt>"` | Send a prompt (fire and forget) |
+| `cfleet attach <name>` | SSH into worker's tmux session |
+| `cfleet logs <name> [-f] [-n N]` | Show/stream worker output |
+| `cfleet status <name>` | Detailed worker info |
+| `cfleet send <name> <path>` | rsync files to worker |
+| `cfleet collect <name> <dest>` | rsync files from worker |
+| `cfleet kill <name> [--all]` | Destroy worker VM(s) |
+| `cfleet serve [--port N]` | Start web dashboard + REST API |
+| `cfleet tui` | Launch interactive TUI |
 
 ### Spawn options
 
 ```bash
 cfleet spawn my-worker \
-  --vm-type snp \                    # regular | snp | tdx
-  --model claude-opus-4-6 \          # override default model
+  --vm-type snp \                    # regular | snp | tdx (confidential VMs)
+  --model claude-opus-4-6 \          # override model
   --instance-type Standard_DC8as_v5  # override Azure SKU
   --repo myapp --repo infra          # specific repos (default: all)
 ```
 
-## TUI
-
-`cfleet tui` launches a three-panel interface:
-
-```
-┌─ Claude Fleet ─────────────────────────────────────────┐
-│                                                         │
-│  Workers            │  my-worker                        │
-│  ─────────          │  ──────────                       │
-│  ● my-worker  idle  │  IP:    20.86.175.224             │
-│  ● worker2   work   │  Model: claude-opus-4-6           │
-│                     │  Repos: myapp, infra              │
-│                     │                                   │
-│                     │  ┌─ Output ────────────────────┐  │
-│                     │  │ I've analyzed the OAuth      │  │
-│                     │  │ requirements and will        │  │
-│                     │  │ implement...                 │  │
-│                     │  └─────────────────────────────┘  │
-│                     │                                   │
-│                     │  > Send prompt here...            │
-│                                                         │
-│  [s]pawn [k]ill [a]ttach [f]send [c]ollect [q]uit      │
-└─────────────────────────────────────────────────────────┘
-```
-
-**Keybindings**: `s` spawn, `k` kill, `a` attach, `f` send files, `c` collect files, `q` quit
-
-## Web Dashboard
-
-`cfleet serve` starts a web server you can access from your browser or phone.
-
-```bash
-cfleet serve                              # http://localhost:8420
-cfleet serve --port 9000                  # custom port
-FLEET_API_TOKEN=secret cfleet serve       # with authentication
-```
-
-The dashboard provides the same controls as the TUI: view workers, stream logs, send prompts, spawn and kill workers.
-
-### REST API
-
-All endpoints are under `/api/`. Authentication is via `Authorization: Bearer <token>` header (or `?token=` query param for SSE).
-
-| Method   | Path                              | Description                          |
-| -------- | --------------------------------- | ------------------------------------ |
-| `GET`    | `/api/workers`                    | List all workers                     |
-| `GET`    | `/api/workers/{name}`             | Worker detail (IP, status, uptime)   |
-| `POST`   | `/api/workers`                    | Spawn a worker (background task)     |
-| `DELETE` | `/api/workers/{name}`             | Kill a worker (background task)      |
-| `POST`   | `/api/workers/{name}/ask`         | Send a prompt                        |
-| `GET`    | `/api/workers/{name}/logs`        | Stream logs (SSE)                    |
-| `GET`    | `/api/workers/{name}/logs/snapshot` | Fetch last N lines                 |
-| `GET`    | `/api/tasks`                      | List background tasks                |
-| `GET`    | `/api/tasks/{id}`                 | Get task status                      |
-
-**Spawn** request body:
-```json
-{"name": "my-worker", "vm_type": "snp", "model": "claude-opus-4-6"}
-```
-
-**Ask** request body:
-```json
-{"prompt": "Build an OAuth login flow"}
-```
-
-**Log streaming** uses Server-Sent Events. Connect with `EventSource`:
-```javascript
-const src = new EventSource('/api/workers/my-worker/logs?token=...');
-src.addEventListener('logs', (e) => console.log(JSON.parse(e.data).content));
-src.addEventListener('status', (e) => console.log(JSON.parse(e.data).idle));
-```
-
-**Spawn/kill** are long-running operations that return a `task_id` immediately. Poll `/api/tasks/{id}` to check progress.
-
-### API config
-
-Add to `~/.cfleet/config.yml`:
-
-```yaml
-api:
-  host: 0.0.0.0
-  port: 8420
-  token: ""          # empty = no auth; or set FLEET_API_TOKEN env var
-```
-
 ## Configuration
 
-### `~/.cfleet/config.yml`
+All config lives in `~/.cfleet/`:
 
-Created by `cfleet init`. Controls defaults for all workers.
-
-```yaml
-anthropic_api_key: "sk-ant-..."
-model: claude-opus-4-6
-
-repos:
-  - name: myapp
-    url: https://github.com/me/myapp.git
-    branch: main
-
-cloud:
-  provider: azure
-  region: westeurope
-  vm_type: regular          # regular | snp | tdx
-  instance_type: Standard_D2s_v5
-  ssh_key: ~/.ssh/id_ed25519
-  ssh_user: azureuser
-  azure:
-    subscription_id: "..."
-    resource_group: fleet-workers
-```
-
-### `~/.cfleet/secrets.env`
-
-Environment variables sourced on every worker:
-
-```bash
-ANTHROPIC_API_KEY=sk-ant-...
-GITHUB_TOKEN=ghp_...
-DATABASE_URL=postgres://...
-```
-
-### `~/.cfleet/CLAUDE.md`
-
-Instructions copied to every worker's `/workspace/CLAUDE.md`. Workers follow these instructions automatically.
-
-### `~/.cfleet/skills/`
-
-Custom skills directory copied to `~/.claude/skills/` on workers.
-
-### `~/.cfleet/mcp-servers.json`
-
-MCP server config copied to `~/.claude/mcp-servers.json` on workers.
-
-## Worker VM layout
-
-```
-/workspace/
-├── repos/          # read-only git clones (push disabled)
-│   ├── myapp/
-│   └── infra/
-├── inbox/          # files from `cfleet send`
-├── outbox/         # put results here for `cfleet collect`
-└── CLAUDE.md       # your instructions
-
-~/.claude/
-├── skills/         # your custom skills
-├── settings.json   # pre-configured for headless operation
-└── mcp-servers.json
-```
-
-## Architecture
-
-```
-cfleet CLI / TUI / Web API
-      │
-      ▼
-Fleet Engine (engine.py)
-      │
-      ├── Pulumi (infra.py)     → create/destroy Azure VMs
-      ├── Ansible (provisioner.py) → bootstrap: deps, Claude Code, repos, skills
-      └── SSH (ssh.py)          → runtime: prompts, logs, attach, rsync
-```
-
-**State is stored in three places:**
-
-| Location                  | What                                    | Format         |
-| ------------------------- | --------------------------------------- | -------------- |
-| `~/.cfleet/config.yml`    | Your configuration                      | YAML           |
-| `~/.cfleet/state.json`    | Worker inventory (IPs, status, prompts) | JSON           |
-| `~/.cfleet/pulumi-state/` | Azure resource state                    | Pulumi backend |
-
-## VM types
-
-| Type    | Flag                | Default SKU         | Description                 |
-| ------- | ------------------- | ------------------- | --------------------------- |
-| Regular | `--vm-type regular` | `Standard_D2s_v5`   | Standard Azure VM           |
-| SNP     | `--vm-type snp`     | `Standard_DC4as_v5` | AMD SEV-SNP confidential VM |
-| TDX     | `--vm-type tdx`     | `Standard_DC4es_v6` | Intel TDX confidential VM   |
+| File | Purpose |
+|---|---|
+| `config.yml` | API keys, cloud settings, defaults |
+| `secrets.env` | Env vars sourced on every worker |
+| `CLAUDE.md` | Instructions for all workers |
+| `skills/` | Custom skills synced to workers |
+| `mcp-servers.json` | MCP server config for workers |
+| `state.json` | Worker inventory (auto-managed) |
 
 ## License
 
