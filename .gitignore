@@ -43,4 +43,4 @@ uv.lock
 plans/
 
 # Unrelated local directories
-ansible-scripts/
+scripties/
