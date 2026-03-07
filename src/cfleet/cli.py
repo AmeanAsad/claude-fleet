@@ -92,7 +92,7 @@ def spawn(
     name: str = typer.Argument(..., help="Worker name"),
     repo: list[str] = typer.Option([], "--repo", "-r", help="Repos to clone (repeatable, defaults to all)"),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Override default model"),
-    vm_type: Optional[str] = typer.Option(None, "--vm-type", help="VM type: regular, snp, or tdx"),
+    vm_type: Optional[str] = typer.Option(None, "--type", help="VM type: regular, snp, or tdx"),
     instance_type: Optional[str] = typer.Option(None, "--instance-type", "-t", help="Override exact Azure SKU"),
     region: Optional[str] = typer.Option(None, "--region", help="Override default region"),
 ):
@@ -104,7 +104,7 @@ def spawn(
         try:
             resolved_vm_type = VMType(vm_type)
         except ValueError:
-            console.print(f"[red]Invalid --vm-type '{vm_type}'. Choose: regular, snp, tdx[/red]")
+            console.print(f"[red]Invalid --type '{vm_type}'. Choose: regular, snp, tdx[/red]")
             raise typer.Exit(1)
 
     engine = _engine()
