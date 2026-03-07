@@ -18,6 +18,35 @@ cd claude-fleet
 pip install -e .
 ```
 
+## Quickstart
+
+```bash
+# 1. Configure — add your Anthropic API key and Azure subscription ID
+cp fleet.yml.example fleet.yml
+vim fleet.yml
+
+# 2. Initialize — creates ~/.cfleet/ config dir and Pulumi stack
+cfleet init
+
+# 3. Spawn a worker VM
+cfleet spawn dev
+
+# 4. Send it a task
+cfleet ask dev "Set up a FastAPI project with auth, tests, and Docker"
+
+# 5. Watch it work
+cfleet logs dev -f
+
+# 6. Jump in interactively (Ctrl+B d to detach)
+cfleet attach dev
+
+# 7. Pull results back to your machine
+cfleet collect dev ./output
+
+# 8. Tear it down when done
+cfleet kill dev
+```
+
 ## Lifecycle
 
 ### 1. Initialize
@@ -71,6 +100,10 @@ cfleet logs my-worker -f     # Stream logs continuously
 ```bash
 cfleet attach my-worker      # SSH into the worker's tmux session (Ctrl+B d to detach)
 ```
+
+<p align="center">
+  <img src="docs/attach.png" alt="Claude Fleet attach" width="500">
+</p>
 
 ### 6. Transfer files
 
