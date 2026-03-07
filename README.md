@@ -1,10 +1,14 @@
 # Claude Fleet
 
-CLI for orchestrating long-running Claude Code instances on Azure VMs. Spawn workers, send prompts, collect results — all over SSH + tmux + rsync.
+CLI for orchestrating long-running Claude Code instances on Azure VMs. Spawn workers, send prompts, stream logs, collect results — all over SSH + tmux + rsync.
 
 ## Prerequisites
 
-- Python 3.11+, [Pulumi CLI](https://www.pulumi.com/docs/install/), Azure CLI (`az login`), SSH key (`~/.ssh/id_ed25519`), `rsync`
+- Python 3.11+
+- [Pulumi CLI](https://www.pulumi.com/docs/install/)
+- Azure CLI (logged in via `az login`)
+- SSH key at `~/.ssh/id_ed25519`
+- `rsync`
 
 ## Install
 
@@ -14,21 +18,118 @@ cd claude-fleet
 pip install -e .
 ```
 
-## Quick start
+## Lifecycle
+
+### 1. Initialize
 
 ```bash
-# Configure and initialize
-cp fleet.yml.example fleet.yml   # add API key + Azure subscription ID
+cp fleet.yml.example fleet.yml
+# Add your Anthropic API key and Azure subscription ID
 cfleet init
-
-# Spawn, use, destroy
-cfleet spawn my-worker
-cfleet ask my-worker "Build an OAuth login flow"
-cfleet logs my-worker
-cfleet kill my-worker
 ```
 
-## Commands
+This creates `~/.cfleet/` with your config, secrets, and a Pulumi stack. If you skip `fleet.yml`, `init` will prompt interactively.
+
+### 2. Spawn workers
+
+```bash
+cfleet spawn my-worker
+```
+
+This provisions an Azure VM, installs Claude Code, clones your repos, and starts a tmux session. The worker is ready when status shows `idle`.
+
+Options:
+
+```bash
+cfleet spawn my-worker \
+  --type snp \                         # regular | snp | tdx (confidential VMs)
+  --model claude-opus-4-6 \            # override default model
+  --instance-type Standard_DC8as_v5 \  # override Azure SKU
+  --repo myapp --repo infra \          # specific repos (default: all from config)
+  --region eastus                      # override default region
+```
+
+### 3. Send prompts
+
+```bash
+cfleet ask my-worker "Build an OAuth login flow for the API"
+```
+
+Fire and forget — the worker picks up the prompt and starts working. Check progress with `ls` or `logs`.
+
+### 4. Monitor
+
+```bash
+cfleet ls                    # List all workers with status
+cfleet status my-worker      # Detailed info (IP, uptime, tmux state)
+cfleet logs my-worker        # Last 100 lines of tmux output
+cfleet logs my-worker -f     # Stream logs continuously
+```
+
+### 5. Interact directly
+
+```bash
+cfleet attach my-worker      # SSH into the worker's tmux session (Ctrl+B d to detach)
+```
+
+### 6. Transfer files
+
+```bash
+cfleet send my-worker ./local-dir         # rsync files to /workspace/inbox/
+cfleet collect my-worker ./output          # rsync /workspace/outbox/ to local
+```
+
+### 7. Tear down
+
+```bash
+cfleet kill my-worker                     # Destroy a single worker
+cfleet kill --all                         # Destroy all workers
+cfleet kill my-worker --collect ./backup  # Collect files before destroying
+```
+
+## TUI
+
+```bash
+cfleet tui
+```
+
+Three-panel interactive terminal UI. Select workers from the left, view detail and live logs on the right, send prompts from the bottom input bar.
+
+Keybindings: **s** spawn, **k** kill, **a** attach, **f** send files, **c** collect, **q** quit.
+
+<p align="center">
+  <img src="docs/tui.png" alt="Claude Fleet TUI" width="700">
+</p>
+
+## Web Dashboard
+
+```bash
+cfleet serve                  # http://localhost:8420
+cfleet serve --port 9000      # custom port
+```
+
+Browser-based dashboard with live log streaming, spawn/kill controls, and prompt input. Accessible from any device on the network.
+
+Set `api.token` in `~/.cfleet/config.yml` or export `FLEET_API_TOKEN` to require authentication.
+
+<p align="center">
+  <img src="docs/dashboard.png" alt="Claude Fleet Dashboard" width="700">
+</p>
+
+## Configuration
+
+All config lives in `~/.cfleet/`:
+
+| File | Purpose |
+|---|---|
+| `config.yml` | API keys, cloud settings, model defaults, SSH config |
+| `secrets.env` | Env vars sourced on every worker |
+| `CLAUDE.md` | System instructions for all workers |
+| `skills/` | Custom skills synced to workers |
+| `mcp-servers.json` | MCP server config for workers |
+| `state.json` | Worker inventory (auto-managed) |
+
+## Command Reference
 
 | Command | Description |
 |---|---|
@@ -44,29 +145,6 @@ cfleet kill my-worker
 | `cfleet kill <name> [--all]` | Destroy worker VM(s) |
 | `cfleet serve [--port N]` | Start web dashboard + REST API |
 | `cfleet tui` | Launch interactive TUI |
-
-### Spawn options
-
-```bash
-cfleet spawn my-worker \
-  --vm-type snp \                    # regular | snp | tdx (confidential VMs)
-  --model claude-opus-4-6 \          # override model
-  --instance-type Standard_DC8as_v5  # override Azure SKU
-  --repo myapp --repo infra          # specific repos (default: all)
-```
-
-## Configuration
-
-All config lives in `~/.cfleet/`:
-
-| File | Purpose |
-|---|---|
-| `config.yml` | API keys, cloud settings, defaults |
-| `secrets.env` | Env vars sourced on every worker |
-| `CLAUDE.md` | Instructions for all workers |
-| `skills/` | Custom skills synced to workers |
-| `mcp-servers.json` | MCP server config for workers |
-| `state.json` | Worker inventory (auto-managed) |
 
 ## License
 
