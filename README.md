@@ -23,7 +23,7 @@ pip install -e .
 ```bash
 # 1. Configure — add your Anthropic API key and Azure subscription ID
 cp fleet.yml.example fleet.yml
-vim fleet.yml
+nano fleet.yml
 
 # 2. Initialize — creates ~/.cfleet/ config dir and Pulumi stack
 cfleet init
@@ -153,31 +153,31 @@ Set `api.token` in `~/.cfleet/config.yml` or export `FLEET_API_TOKEN` to require
 
 All config lives in `~/.cfleet/`:
 
-| File | Purpose |
-|---|---|
-| `config.yml` | API keys, cloud settings, model defaults, SSH config |
-| `secrets.env` | Env vars sourced on every worker |
-| `CLAUDE.md` | System instructions for all workers |
-| `skills/` | Custom skills synced to workers |
-| `mcp-servers.json` | MCP server config for workers |
-| `state.json` | Worker inventory (auto-managed) |
+| File               | Purpose                                              |
+| ------------------ | ---------------------------------------------------- |
+| `config.yml`       | API keys, cloud settings, model defaults, SSH config |
+| `secrets.env`      | Env vars sourced on every worker                     |
+| `CLAUDE.md`        | System instructions for all workers                  |
+| `skills/`          | Custom skills synced to workers                      |
+| `mcp-servers.json` | MCP server config for workers                        |
+| `state.json`       | Worker inventory (auto-managed)                      |
 
 ## Command Reference
 
-| Command | Description |
-|---|---|
-| `cfleet init` | Set up `~/.cfleet/` and Pulumi stack |
-| `cfleet spawn <name>` | Create a worker VM |
-| `cfleet ls` | List all workers |
-| `cfleet ask <name> "<prompt>"` | Send a prompt (fire and forget) |
-| `cfleet attach <name>` | SSH into worker's tmux session |
-| `cfleet logs <name> [-f] [-n N]` | Show/stream worker output |
-| `cfleet status <name>` | Detailed worker info |
-| `cfleet send <name> <path>` | rsync files to worker |
-| `cfleet collect <name> <dest>` | rsync files from worker |
-| `cfleet kill <name> [--all]` | Destroy worker VM(s) |
-| `cfleet serve [--port N]` | Start web dashboard + REST API |
-| `cfleet tui` | Launch interactive TUI |
+| Command                          | Description                          |
+| -------------------------------- | ------------------------------------ |
+| `cfleet init`                    | Set up `~/.cfleet/` and Pulumi stack |
+| `cfleet spawn <name>`            | Create a worker VM                   |
+| `cfleet ls`                      | List all workers                     |
+| `cfleet ask <name> "<prompt>"`   | Send a prompt (fire and forget)      |
+| `cfleet attach <name>`           | SSH into worker's tmux session       |
+| `cfleet logs <name> [-f] [-n N]` | Show/stream worker output            |
+| `cfleet status <name>`           | Detailed worker info                 |
+| `cfleet send <name> <path>`      | rsync files to worker                |
+| `cfleet collect <name> <dest>`   | rsync files from worker              |
+| `cfleet kill <name> [--all]`     | Destroy worker VM(s)                 |
+| `cfleet serve [--port N]`        | Start web dashboard + REST API       |
+| `cfleet tui`                     | Launch interactive TUI               |
 
 ## License
 
