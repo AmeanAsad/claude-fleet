@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import typer
@@ -148,8 +149,8 @@ def list_workers():
                     w.status = "idle"
                     state_dirty = True
                 ssh.close()
-            except Exception:
-                pass
+            except Exception as e:
+                console.print(f"[dim]Could not check {w.name}: {e}[/dim]")
     if state_dirty:
         engine.state.save()
 
@@ -331,6 +332,17 @@ def serve(
     import uvicorn
     from cfleet.api import create_app
 
+    from cfleet.config import FleetConfig
+    try:
+        cfg = FleetConfig.load()
+        token = cfg.api.token
+    except FileNotFoundError:
+        token = ""
+    if not token and not os.environ.get("FLEET_API_TOKEN"):
+        console.print(
+            "[yellow]Warning: No API token set. The dashboard is open to anyone who can reach it.\n"
+            "Set 'api.token' in ~/.cfleet/config.yml or export FLEET_API_TOKEN.[/yellow]"
+        )
     console.print(f"Claude Fleet dashboard at [bold]http://{host}:{port}[/bold]")
     uvicorn.run(create_app(), host=host, port=port)
 

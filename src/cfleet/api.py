@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 import uuid
@@ -34,7 +35,9 @@ _write_lock = asyncio.Lock()
 _read_executor = ThreadPoolExecutor(max_workers=8)
 
 # Background task registry: task_id -> TaskInfo
+# Pruned on every write to prevent unbounded growth.
 _tasks: dict[str, TaskInfo] = {}
+_MAX_FINISHED_TASKS = 200
 
 
 # ---------------------------------------------------------------------------
@@ -91,10 +94,10 @@ async def _verify_token(
     if not token:
         return  # Auth disabled
     # Check header first, then query param (for SSE EventSource)
-    if credentials and credentials.credentials == token:
+    if credentials and hmac.compare_digest(credentials.credentials, token):
         return
     query_token = request.query_params.get("token", "")
-    if query_token == token:
+    if hmac.compare_digest(query_token, token):
         return
     raise HTTPException(status_code=401, detail="Invalid or missing token")
 
@@ -117,6 +120,18 @@ async def _run_read(func):
     return await loop.run_in_executor(_read_executor, func)
 
 
+def _prune_tasks() -> None:
+    """Remove oldest finished tasks if over the cap."""
+    finished = [
+        (tid, t) for tid, t in _tasks.items() if t.finished_at
+    ]
+    if len(finished) <= _MAX_FINISHED_TASKS:
+        return
+    finished.sort(key=lambda x: x[1].finished_at or "")
+    for tid, _ in finished[: len(finished) - _MAX_FINISHED_TASKS]:
+        del _tasks[tid]
+
+
 async def _run_background_task(task_id: str, func):
     """Run a long engine operation and update the task registry on completion."""
     try:
@@ -127,6 +142,7 @@ async def _run_background_task(task_id: str, func):
         _tasks[task_id].error = str(e)
     finally:
         _tasks[task_id].finished_at = datetime.now(timezone.utc).isoformat()
+        _prune_tasks()
 
 
 def _make_ssh(worker_name: str) -> WorkerSSH:

@@ -24,6 +24,14 @@ from textual.widgets import (
 from cfleet.config import FleetConfig, FleetState, WorkerState
 
 
+class WorkerListItem(ListItem):
+    """ListItem that carries the worker name without monkey-patching."""
+
+    def __init__(self, *args, worker_name: str, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.worker_name = worker_name
+
+
 # ---------------------------------------------------------------------------
 # Spawn dialog
 # ---------------------------------------------------------------------------
@@ -307,28 +315,31 @@ class FleetTUI(App):
                 "spawning": "[cyan]◐[/cyan]",
                 "provisioning": "[cyan]◑[/cyan]",
             }.get(worker.status, "○")
-            item = ListItem(Label(f"{status_icon} {name}  {worker.status}", markup=True))
-            item._worker_name = name  # stash for lookup
+            item = WorkerListItem(
+                Label(f"{status_icon} {name}  {worker.status}", markup=True),
+                worker_name=name,
+            )
             listview.append(item)
 
         # Restore selection
         if old_selection:
             for i, item in enumerate(listview.children):
-                if getattr(item, "_worker_name", None) == old_selection:
+                if isinstance(item, WorkerListItem) and item.worker_name == old_selection:
                     listview.index = i
                     break
 
     def _get_selected_worker_name(self) -> str | None:
         listview = self.query_one("#worker-list", ListView)
-        if listview.highlighted_child is not None:
-            return getattr(listview.highlighted_child, "_worker_name", None)
+        child = listview.highlighted_child
+        if isinstance(child, WorkerListItem):
+            return child.worker_name
         return None
 
     @on(ListView.Highlighted, "#worker-list")
     def worker_selected(self, event: ListView.Highlighted) -> None:
         if event.item is None:
             return
-        name = getattr(event.item, "_worker_name", None)
+        name = event.item.worker_name if isinstance(event.item, WorkerListItem) else None
         if name:
             self._selected_worker = name
             self._update_detail(name)

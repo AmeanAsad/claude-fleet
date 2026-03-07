@@ -65,16 +65,17 @@ def bootstrap_worker(
         inv.write(f"{ip}\n")
         inv_path = inv.name
 
-    r = ansible_runner.run(
-        private_data_dir=str(ANSIBLE_DIR),
-        playbook="playbooks/bootstrap.yml",
-        inventory=inv_path,
-        extravars=extravars,
-        envvars={"ANSIBLE_ROLES_PATH": str(ANSIBLE_DIR / "roles")},
-    )
+    try:
+        r = ansible_runner.run(
+            private_data_dir=str(ANSIBLE_DIR),
+            playbook="playbooks/bootstrap.yml",
+            inventory=inv_path,
+            extravars=extravars,
+            envvars={"ANSIBLE_ROLES_PATH": str(ANSIBLE_DIR / "roles")},
+        )
 
-    Path(inv_path).unlink(missing_ok=True)
-
-    if r.rc != 0:
-        stdout_text = r.stdout.read() if hasattr(r.stdout, "read") else str(r.stdout)
-        raise ProvisionError(f"Ansible bootstrap failed for {worker_name}:\n{stdout_text}")
+        if r.rc != 0:
+            stdout_text = r.stdout.read() if hasattr(r.stdout, "read") else str(r.stdout)
+            raise ProvisionError(f"Ansible bootstrap failed for {worker_name}:\n{stdout_text}")
+    finally:
+        Path(inv_path).unlink(missing_ok=True)

@@ -75,20 +75,31 @@ class WorkerSSH:
     def stream_logs(self, interval: float = 2.0) -> Iterator[str]:
         """Tail tmux output by polling. Yields new lines.
 
-        Polls tmux capture-pane on interval. This is not efficient but is simple.
-        Could be improved with inotifywait on a log file.
+        Compares full snapshots so repeated legitimate lines are not dropped.
         """
-        seen_lines: set[str] = set()
+        prev_output = ""
         while True:
             try:
                 output = self.read_logs(lines=200)
-                for line in output.splitlines():
-                    if line and line not in seen_lines:
-                        seen_lines.add(line)
+                if output != prev_output:
+                    # Find new lines by comparing from the end of the previous snapshot
+                    prev_lines = prev_output.splitlines()
+                    curr_lines = output.splitlines()
+                    # Find where old content ends in new content
+                    overlap = 0
+                    if prev_lines:
+                        for i in range(len(curr_lines)):
+                            if curr_lines[i:] == prev_lines[:len(curr_lines) - i]:
+                                break
+                            if curr_lines[i:i + len(prev_lines)] == prev_lines:
+                                overlap = i + len(prev_lines)
+                                break
+                        else:
+                            overlap = 0
+                    new_lines = curr_lines[overlap:]
+                    for line in new_lines:
                         yield line
-                # Cap the seen set to prevent unbounded growth
-                if len(seen_lines) > 5000:
-                    seen_lines = set(list(seen_lines)[-2000:])
+                    prev_output = output
             except Exception:
                 yield "[connection lost, retrying...]"
             time.sleep(interval)
