@@ -13,7 +13,7 @@ class ProvisionError(Exception):
 
 
 # Path to the ansible directory shipped with claude-fleet
-ANSIBLE_DIR = Path(__file__).parent.parent.parent / "ansible"
+ANSIBLE_DIR = Path(__file__).parent / "ansible"
 
 
 def bootstrap_worker(

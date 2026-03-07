@@ -56,7 +56,7 @@ class FleetEngine:
 
         claude_md_path = FLEET_DIR / "CLAUDE.md"
         if not claude_md_path.exists():
-            defaults_dir = Path(__file__).parent.parent.parent / "defaults"
+            defaults_dir = Path(__file__).parent / "defaults"
             if (defaults_dir / "CLAUDE.md").exists():
                 import shutil
                 shutil.copy(defaults_dir / "CLAUDE.md", claude_md_path)

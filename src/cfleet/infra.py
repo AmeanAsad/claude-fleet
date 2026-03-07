@@ -65,7 +65,7 @@ class InfraManager:
     def __init__(self, fleet_config: FleetConfig):
         self.config = fleet_config
         self.provider = get_provider(fleet_config.cloud.provider)
-        self._infra_dir = Path(__file__).parent.parent.parent / "infra"
+        self._infra_dir = Path(__file__).parent / "infra_pulumi"
 
     def _get_stack(self) -> auto.Stack:
         project_name = self.config.pulumi.project

@@ -28,3 +28,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cfleet"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/cfleet/infra_pulumi" = "cfleet/infra_pulumi"
+"src/cfleet/ansible" = "cfleet/ansible"
+"src/cfleet/defaults" = "cfleet/defaults"
+"src/cfleet/static" = "cfleet/static"
