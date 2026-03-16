@@ -11,18 +11,22 @@ from pathlib import Path
 import pulumi
 import pulumi_azure_native as azure
 
-config = pulumi.Config("claude-fleet")
 
-workers_raw = config.get("workers") or "{}"
-workers = json.loads(workers_raw)
+def pulumi_program() -> None:
+    """Inline Pulumi program — called directly by the automation API."""
+    config = pulumi.Config("claude-fleet")
 
-azure_cfg_raw = config.get("azure") or "{}"
-azure_cfg = json.loads(azure_cfg_raw)
+    workers_raw = config.get("workers") or "{}"
+    workers = json.loads(workers_raw)
 
-# If there's no azure config yet (e.g., during init), skip everything
-if not azure_cfg:
-    pulumi.log.info("No azure config found, skipping resource creation")
-else:
+    azure_cfg_raw = config.get("azure") or "{}"
+    azure_cfg = json.loads(azure_cfg_raw)
+
+    # If there's no azure config yet (e.g., during init), skip everything
+    if not azure_cfg:
+        pulumi.log.info("No azure config found, skipping resource creation")
+        return
+
     region = azure_cfg["region"]
     rg_name = azure_cfg["resource_group"]
     ssh_user = azure_cfg["ssh_user"]

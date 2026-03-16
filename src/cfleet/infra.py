@@ -10,6 +10,7 @@ from pathlib import Path
 from pulumi import automation as auto
 
 from cfleet.config import FleetConfig
+from cfleet.infra_pulumi.__main__ import pulumi_program
 
 
 class CloudProvider(ABC):
@@ -65,13 +66,11 @@ class InfraManager:
     def __init__(self, fleet_config: FleetConfig):
         self.config = fleet_config
         self.provider = get_provider(fleet_config.cloud.provider)
-        self._infra_dir = Path(__file__).parent / "infra_pulumi"
 
     def _get_stack(self) -> auto.Stack:
         project_name = self.config.pulumi.project
         stack_name = self.config.pulumi.stack
         backend_url = self.config.pulumi.backend.replace("~", str(Path.home()))
-
         # Ensure backend dir exists for file:// backends
         if backend_url.startswith("file://"):
             Path(backend_url.removeprefix("file://")).mkdir(parents=True, exist_ok=True)
@@ -81,31 +80,29 @@ class InfraManager:
         # so developers don't need to configure it manually.
         env_vars.setdefault("PULUMI_CONFIG_PASSPHRASE", "")
 
+        ws_opts = auto.LocalWorkspaceOptions(
+            project_settings=auto.ProjectSettings(
+                name=project_name,
+                runtime="python",
+                backend=auto.ProjectBackend(url=backend_url),
+            ),
+            env_vars=env_vars,
+        )
+
+        # Use inline program mode — runs in-process, no subprocess/pip needed
         try:
             stack = auto.select_stack(
                 stack_name=stack_name,
-                work_dir=str(self._infra_dir),
-                opts=auto.LocalWorkspaceOptions(
-                    project_settings=auto.ProjectSettings(
-                        name=project_name,
-                        runtime="python",
-                        backend=auto.ProjectBackend(url=backend_url),
-                    ),
-                    env_vars=env_vars,
-                ),
+                project_name=project_name,
+                program=pulumi_program,
+                opts=ws_opts,
             )
         except auto.errors.StackNotFoundError:
             stack = auto.create_stack(
                 stack_name=stack_name,
-                work_dir=str(self._infra_dir),
-                opts=auto.LocalWorkspaceOptions(
-                    project_settings=auto.ProjectSettings(
-                        name=project_name,
-                        runtime="python",
-                        backend=auto.ProjectBackend(url=backend_url),
-                    ),
-                    env_vars=env_vars,
-                ),
+                project_name=project_name,
+                program=pulumi_program,
+                opts=ws_opts,
             )
 
         # Set provider-specific config
