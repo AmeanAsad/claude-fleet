@@ -1,7 +1,7 @@
 .PHONY: install reinstall
 
 install:
-	uv pip install -e .
+	uv tool install -e . --python 3.11
 
 reinstall:
-	uv pip install --no-cache -e . --force-reinstall
+	uv tool install -e . --python 3.11 --force-reinstall
