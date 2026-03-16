@@ -23,7 +23,7 @@ class VMType(str, Enum):
 DEFAULT_SKUS: dict[VMType, str] = {
     VMType.REGULAR: "Standard_D2s_v5",
     VMType.SNP: "Standard_DC4as_v5",
-    VMType.TDX: "Standard_DC4es_v6",
+    VMType.TDX: "Standard_DC4as_v5",
 }
 
 
