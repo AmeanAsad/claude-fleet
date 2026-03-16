@@ -1,7 +1,7 @@
 .PHONY: install reinstall
 
 install:
-	uv tool install -e . --python 3.11
+	uv tool install -e .
 
 reinstall:
-	uv tool install -e . --python 3.11 --force-reinstall
+	uv tool install -e . --force-reinstall
