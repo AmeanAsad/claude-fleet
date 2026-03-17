@@ -1,8 +1,8 @@
 """Pulumi program for Claude Fleet worker VMs.
 
 Reads a 'workers' config map and creates one Azure VM per entry.
-Shared infrastructure (resource group, vnet, subnet, NSG) is created once
-and used by all workers.
+Networking infrastructure (vnet, subnet, NSG) is created per-region so workers
+can be deployed across different Azure regions within a single resource group.
 """
 
 import json
@@ -43,7 +43,7 @@ def pulumi_program() -> None:
         ssh_pub_key = "ssh-ed25519 PLACEHOLDER"
 
     # =========================================================================
-    # Shared infrastructure
+    # Shared resource group (location is just metadata for the RG itself)
     # =========================================================================
 
     resource_group = azure.resources.ResourceGroup(
@@ -52,41 +52,59 @@ def pulumi_program() -> None:
         location=region,
     )
 
-    vnet = azure.network.VirtualNetwork(
-        "fleet-vnet",
-        resource_group_name=resource_group.name,
-        location=resource_group.location,
-        address_space=azure.network.AddressSpaceArgs(
-            address_prefixes=["10.0.0.0/16"],
-        ),
-    )
+    # =========================================================================
+    # Per-region networking (vnet, subnet, NSG)
+    # =========================================================================
 
-    subnet = azure.network.Subnet(
-        "fleet-subnet",
-        resource_group_name=resource_group.name,
-        virtual_network_name=vnet.name,
-        address_prefix="10.0.1.0/24",
-    )
+    # Collect all regions needed by workers
+    needed_regions = {region}  # always include default region
+    for worker_cfg in workers.values():
+        needed_regions.add(worker_cfg.get("region", region))
 
-    nsg = azure.network.NetworkSecurityGroup(
-        "fleet-nsg",
-        resource_group_name=resource_group.name,
-        location=resource_group.location,
-        security_rules=[
-            azure.network.SecurityRuleArgs(
-                name="SSH",
-                priority=1000,
-                direction="Inbound",
-                access="Allow",
-                protocol="Tcp",
-                source_port_range="*",
-                destination_port_range="22",
-                # TODO: lock to user's IP via --my-ip flag on fleet init
-                source_address_prefix="*",
-                destination_address_prefix="*",
+    # Use a /16 per region with different second octets to avoid overlap
+    region_nets: dict[str, tuple] = {}  # region -> (subnet, nsg)
+    for idx, loc in enumerate(sorted(needed_regions)):
+        suffix = loc.replace(" ", "").lower()
+        prefix = f"10.{idx}.0.0/16"
+        subnet_prefix = f"10.{idx}.1.0/24"
+
+        vnet = azure.network.VirtualNetwork(
+            f"fleet-vnet-{suffix}",
+            resource_group_name=resource_group.name,
+            location=loc,
+            address_space=azure.network.AddressSpaceArgs(
+                address_prefixes=[prefix],
             ),
-        ],
-    )
+        )
+
+        subnet = azure.network.Subnet(
+            f"fleet-subnet-{suffix}",
+            resource_group_name=resource_group.name,
+            virtual_network_name=vnet.name,
+            address_prefix=subnet_prefix,
+        )
+
+        nsg = azure.network.NetworkSecurityGroup(
+            f"fleet-nsg-{suffix}",
+            resource_group_name=resource_group.name,
+            location=loc,
+            security_rules=[
+                azure.network.SecurityRuleArgs(
+                    name="SSH",
+                    priority=1000,
+                    direction="Inbound",
+                    access="Allow",
+                    protocol="Tcp",
+                    source_port_range="*",
+                    destination_port_range="22",
+                    # TODO: lock to user's IP via --my-ip flag on fleet init
+                    source_address_prefix="*",
+                    destination_address_prefix="*",
+                ),
+            ],
+        )
+
+        region_nets[loc] = (subnet, nsg)
 
     # =========================================================================
     # Per-worker resources
@@ -95,11 +113,14 @@ def pulumi_program() -> None:
     for name, worker_cfg in workers.items():
         instance_type = worker_cfg.get("instance_type", default_instance_type)
         vm_type = worker_cfg.get("vm_type", "regular")
+        worker_location = worker_cfg.get("region", region)
+
+        worker_subnet, worker_nsg = region_nets[worker_location]
 
         public_ip = azure.network.PublicIPAddress(
             f"{name}-ip",
             resource_group_name=resource_group.name,
-            location=resource_group.location,
+            location=worker_location,
             public_ip_allocation_method="Static",
             sku=azure.network.PublicIPAddressSkuArgs(
                 name="Standard",
@@ -109,15 +130,15 @@ def pulumi_program() -> None:
         nic = azure.network.NetworkInterface(
             f"{name}-nic",
             resource_group_name=resource_group.name,
-            location=resource_group.location,
+            location=worker_location,
             ip_configurations=[
                 azure.network.NetworkInterfaceIPConfigurationArgs(
                     name="primary",
-                    subnet=azure.network.SubnetArgs(id=subnet.id),
+                    subnet=azure.network.SubnetArgs(id=worker_subnet.id),
                     public_ip_address=azure.network.PublicIPAddressArgs(id=public_ip.id),
                 ),
             ],
-            network_security_group=azure.network.NetworkSecurityGroupArgs(id=nsg.id),
+            network_security_group=azure.network.NetworkSecurityGroupArgs(id=worker_nsg.id),
         )
 
         # Confidential VM settings for SNP/TDX
@@ -170,7 +191,7 @@ def pulumi_program() -> None:
 
         vm_args = dict(
             resource_group_name=resource_group.name,
-            location=resource_group.location,
+            location=worker_location,
             hardware_profile=azure.compute.HardwareProfileArgs(
                 vm_size=instance_type,
             ),

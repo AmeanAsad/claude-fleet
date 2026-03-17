@@ -150,6 +150,9 @@ class InfraManager:
             "claude-fleet:azure", auto.ConfigValue(value=json.dumps(azure_cfg))
         )
 
+        # Sync Pulumi state with actual cloud resources before deploying
+        stack.refresh(on_output=lambda msg: None)
+
         result = stack.up(on_output=lambda msg: None)
         return {k: v.value for k, v in result.outputs.items()}
 
@@ -167,6 +170,7 @@ class InfraManager:
             "claude-fleet:workers", auto.ConfigValue(value=json.dumps(workers))
         )
 
+        stack.refresh(on_output=lambda msg: None)
         stack.up(on_output=lambda msg: None)
 
     def destroy_all(self) -> None:
