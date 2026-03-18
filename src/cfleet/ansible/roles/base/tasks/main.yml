@@ -29,6 +29,18 @@
     content: |
       set -g mouse on
       set -g history-limit 50000
+      set -s set-clipboard on
+      set -s escape-time 0
+      set -g default-terminal "tmux-256color"
+      set -ag terminal-overrides ",xterm-256color:RGB"
+      set -g focus-events on
+      set -g status-interval 5
+      set -g status-style "bg=#1a1b26,fg=#a9b1d6"
+      set -g status-left "#[bold]#S "
+      set -g status-right "#H | %H:%M"
+      set -g renumber-windows on
+      set -g base-index 1
+      setw -g pane-base-index 1
   become: true
 
 # Node.js — Claude Code needs it for npm-based MCP servers
