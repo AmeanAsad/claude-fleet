@@ -31,8 +31,8 @@
       set -g history-limit 50000
       set -s set-clipboard on
       set -s copy-command 'printf "\033]52;c;$(base64)\a" > /dev/tty'
-      bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel 'printf "\033]52;c;$(base64)\a" > /dev/tty'
-      bind -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel 'printf "\033]52;c;$(base64)\a" > /dev/tty'
+      bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-no-clear 'printf "\033]52;c;$(base64)\a" > /dev/tty'
+      bind -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-no-clear 'printf "\033]52;c;$(base64)\a" > /dev/tty'
       set -g allow-passthrough on
       set -s escape-time 0
       set -g default-terminal "tmux-256color"
