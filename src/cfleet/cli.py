@@ -37,7 +37,7 @@ def init(
     """Create ~/.cfleet/ directory with example config, CLAUDE.md, skills/. Initialize Pulumi stack."""
     import yaml as _yaml
     from pathlib import Path
-    from cfleet.config import FleetConfig, FLEET_DIR, CONFIG_PATH
+    from cfleet.config import FleetConfig, FLEET_DIR, CONFIG_PATH, PROVIDER_DEFAULTS
     from cfleet.engine import FleetEngine
 
     # init can run before config exists, so handle that
@@ -56,28 +56,70 @@ def init(
             config.anthropic_api_key = overrides["anthropic_api_key"]
 
         cloud = overrides.get("cloud", {})
+        if cloud.get("provider"):
+            config.cloud.provider = cloud["provider"]
+        if cloud.get("region"):
+            config.cloud.region = cloud["region"]
+        if cloud.get("ssh_user"):
+            config.cloud.ssh_user = cloud["ssh_user"]
+        if cloud.get("instance_type"):
+            config.cloud.instance_type = cloud["instance_type"]
         azure = cloud.get("azure", {})
         if azure.get("subscription_id"):
             config.cloud.azure.subscription_id = azure["subscription_id"]
+        gcp = cloud.get("gcp", {})
+        if gcp.get("project_id"):
+            config.cloud.gcp.project_id = gcp["project_id"]
+        if gcp.get("zone"):
+            config.cloud.gcp.zone = gcp["zone"]
 
-    # Fall back to interactive prompts for anything still missing
+    # --- Provider selection (must come first) ---
+    if not config.cloud.provider:
+        provider = typer.prompt("Cloud provider", default="azure", show_choices=True,
+                                type=typer.Choice(["azure", "gcp"]))
+        config.cloud.provider = provider
+
+    # Apply provider defaults for any fields not explicitly set
+    defaults = PROVIDER_DEFAULTS.get(config.cloud.provider, {})
+    if not config.cloud.region:
+        config.cloud.region = defaults.get("region", "")
+    if not config.cloud.ssh_user:
+        config.cloud.ssh_user = defaults.get("ssh_user", "")
+    if not config.cloud.instance_type:
+        config.cloud.instance_type = defaults.get("instance_type", "")
+
+    # --- API key ---
     if not config.anthropic_api_key:
         api_key = typer.prompt("Anthropic API key", hide_input=True)
         config.anthropic_api_key = api_key
 
-    if not config.cloud.azure.subscription_id:
-        console.print(
-            "[dim]Tip: run [bold]az account show --query id -o tsv[/bold] to get your subscription ID[/dim]"
-        )
-        sub_id = typer.prompt("Azure subscription ID")
-        config.cloud.azure.subscription_id = sub_id
+    # --- Provider-specific fields ---
+    provider = config.cloud.provider
 
-    # Generate unique resource group name if not set
-    if not config.cloud.azure.resource_group:
-        import secrets as _secrets
-        slug = _secrets.token_hex(3)  # 6 hex chars
-        config.cloud.azure.resource_group = f"{slug}-fleet-workers"
-        console.print(f"Resource group: [bold]{config.cloud.azure.resource_group}[/bold]")
+    if provider == "azure":
+        if not config.cloud.azure.subscription_id:
+            console.print(
+                "[dim]Tip: run [bold]az account show --query id -o tsv[/bold] to get your subscription ID[/dim]"
+            )
+            sub_id = typer.prompt("Azure subscription ID")
+            config.cloud.azure.subscription_id = sub_id
+
+        if not config.cloud.azure.resource_group:
+            import secrets as _secrets
+            slug = _secrets.token_hex(3)
+            config.cloud.azure.resource_group = f"{slug}-fleet-workers"
+            console.print(f"Resource group: [bold]{config.cloud.azure.resource_group}[/bold]")
+
+    elif provider == "gcp":
+        if not config.cloud.gcp.project_id:
+            console.print(
+                "[dim]Tip: run [bold]gcloud config get-value project[/bold] to get your project ID[/dim]"
+            )
+            project_id = typer.prompt("GCP project ID")
+            config.cloud.gcp.project_id = project_id
+
+    console.print(f"Provider: [bold]{provider}[/bold]  Region: [bold]{config.cloud.region}[/bold]  "
+                  f"SSH user: [bold]{config.cloud.ssh_user}[/bold]")
 
     engine = FleetEngine(config=config)
     engine.init()
@@ -93,11 +135,16 @@ def spawn(
     repo: list[str] = typer.Option([], "--repo", "-r", help="Repos to clone (repeatable, defaults to all)"),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Override default model"),
     vm_type: Optional[str] = typer.Option(None, "--type", help="VM type: regular, snp, or tdx"),
-    instance_type: Optional[str] = typer.Option(None, "--instance-type", "-t", help="Override exact Azure SKU"),
+    instance_type: Optional[str] = typer.Option(None, "--instance-type", "-t", help="Override machine type/SKU"),
     region: Optional[str] = typer.Option(None, "--region", help="Override default region"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Cloud provider: azure or gcp (defaults to config)"),
 ):
     """Spawn a new fleet worker VM."""
     from cfleet.config import VMType
+
+    if provider and provider not in ("azure", "gcp"):
+        console.print(f"[red]Invalid --provider '{provider}'. Choose: azure, gcp[/red]")
+        raise typer.Exit(1)
 
     resolved_vm_type = None
     if vm_type:
@@ -115,6 +162,7 @@ def spawn(
         vm_type=resolved_vm_type,
         instance_type=instance_type,
         region=region,
+        provider=provider,
     )
 
 
@@ -142,7 +190,7 @@ def list_workers():
             try:
                 ssh = WorkerSSH(
                     ip=w.ip,
-                    user=engine.config.cloud.ssh_user,
+                    user=w.ssh_user or engine.config.resolve_ssh_user(provider=w.provider),
                     key_path=str(engine.config.resolve_ssh_key()),
                 )
                 if ssh.is_claude_idle():
@@ -157,6 +205,7 @@ def list_workers():
     table = Table(title="Fleet Workers")
     table.add_column("Name", style="bold")
     table.add_column("Status")
+    table.add_column("Provider")
     table.add_column("VM Type")
     table.add_column("SKU")
     table.add_column("IP")
@@ -185,6 +234,7 @@ def list_workers():
         table.add_row(
             w.name,
             f"[{color}]{w.status}[/{color}]",
+            w.provider,
             f"[{vt_color}]{w.vm_type}[/{vt_color}]",
             w.instance_type,
             w.ip or "—",

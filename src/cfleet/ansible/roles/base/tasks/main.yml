@@ -2,6 +2,14 @@
 # System dependencies — adapted from claude-dev reference role.
 # Installs everything needed for Claude Code to work on a fresh Ubuntu 24.04 VM.
 
+- name: Ensure universe repo is enabled and apt cache is fresh
+  ansible.builtin.shell: |
+    apt-get install -y software-properties-common 2>/dev/null || true
+    add-apt-repository -y universe 2>/dev/null || true
+    apt-get update -y
+  become: true
+  changed_when: true
+
 - name: Install system packages
   ansible.builtin.apt:
     name:
@@ -17,34 +25,116 @@
       - unzip
       - libssl-dev
       - pkg-config
+      - ncurses-bin
     state: present
-    update_cache: true
   become: true
 
-- name: Configure tmux (mouse scroll, larger scrollback)
+- name: Install Ghostty terminfo for xterm-ghostty support
+  ansible.builtin.shell: |
+    infocmp -x xterm-ghostty > /dev/null 2>&1
+  register: ghostty_terminfo_check
+  changed_when: false
+  failed_when: false
+  delegate_to: localhost
+  become: false
+
+- name: Copy Ghostty terminfo to remote host
+  when: ghostty_terminfo_check.rc == 0
+  block:
+    - name: Export Ghostty terminfo locally
+      ansible.builtin.shell: infocmp -x xterm-ghostty
+      delegate_to: localhost
+      become: false
+      register: ghostty_terminfo
+      changed_when: false
+
+    - name: Write terminfo source on remote
+      ansible.builtin.copy:
+        content: "{{ ghostty_terminfo.stdout }}"
+        dest: /tmp/ghostty.terminfo
+        mode: "0644"
+
+    - name: Compile Ghostty terminfo on remote
+      ansible.builtin.command: tic -x /tmp/ghostty.terminfo
+      become: true
+      changed_when: true
+
+    - name: Clean up terminfo source
+      ansible.builtin.file:
+        path: /tmp/ghostty.terminfo
+        state: absent
+
+- name: Check tmux version
+  ansible.builtin.shell: tmux -V 2>/dev/null | grep -oP '[\d.]+' || echo "0"
+  register: tmux_version
+  changed_when: false
+
+- name: Install tmux 3.5a if version < 3.3
+  when: tmux_version.stdout is version('3.3', '<')
+  become: true
+  block:
+    - name: Install FUSE for AppImage support
+      ansible.builtin.apt:
+        name: libfuse2
+        state: present
+
+    - name: Download prebuilt tmux AppImage
+      ansible.builtin.get_url:
+        url: https://github.com/nelsonenzo/tmux-appimage/releases/download/3.5a/tmux.appimage
+        dest: /usr/local/bin/tmux
+        mode: "0755"
+        force: true
+
+- name: Configure tmux
   ansible.builtin.copy:
     dest: "/home/{{ ansible_user }}/.tmux.conf"
     owner: "{{ ansible_user }}"
     mode: "0644"
     content: |
+      # --- Core ---
       set -g mouse on
       set -g history-limit 50000
-      set -s set-clipboard on
-      set -s copy-command 'printf "\033]52;c;$(base64)\a" > /dev/tty'
-      bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-no-clear 'printf "\033]52;c;$(base64)\a" > /dev/tty'
-      bind -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-no-clear 'printf "\033]52;c;$(base64)\a" > /dev/tty'
-      set -g allow-passthrough on
       set -s escape-time 0
       set -g default-terminal "tmux-256color"
       set -ag terminal-overrides ",xterm-256color:RGB"
       set -g focus-events on
+
+      # --- Clipboard (OSC 52) ---
+      set -s set-clipboard on
+      set -g allow-passthrough on
+      set -s copy-command 'printf "\033]52;c;$(base64)\a" > /dev/tty'
+      bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-no-clear 'printf "\033]52;c;$(base64)\a" > /dev/tty'
+      bind -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-no-clear 'printf "\033]52;c;$(base64)\a" > /dev/tty'
+
+      # --- Vi copy mode ---
+      setw -g mode-keys vi
+      bind -T copy-mode-vi v send-keys -X begin-selection
+      bind -T copy-mode-vi y send-keys -X copy-pipe-and-cancel 'printf "\033]52;c;$(base64)\a" > /dev/tty'
+
+      # --- Pane navigation ---
+      bind h select-pane -L
+      bind j select-pane -D
+      bind k select-pane -U
+      bind l select-pane -R
+      bind -r H resize-pane -L 5
+      bind -r J resize-pane -D 5
+      bind -r K resize-pane -U 5
+      bind -r L resize-pane -R 5
+
+      # --- Windows ---
+      set -g renumber-windows on
+      set -g base-index 1
+      setw -g pane-base-index 1
+
+      # --- Status bar ---
       set -g status-interval 5
       set -g status-style "bg=#1a1b26,fg=#a9b1d6"
       set -g status-left "#[bold]#S "
       set -g status-right "#H | %H:%M"
-      set -g renumber-windows on
-      set -g base-index 1
-      setw -g pane-base-index 1
+
+      # --- Activity monitoring ---
+      setw -g monitor-activity on
+      set -g visual-activity off
   become: true
 
 # Node.js — Claude Code needs it for npm-based MCP servers

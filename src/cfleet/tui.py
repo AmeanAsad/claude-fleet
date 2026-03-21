@@ -47,7 +47,7 @@ class SpawnDialog(ModalScreen[dict | None]):
     #spawn-dialog {
         width: 60;
         height: auto;
-        max-height: 20;
+        max-height: 24;
         border: thick $accent;
         background: $surface;
         padding: 1 2;
@@ -69,14 +69,20 @@ class SpawnDialog(ModalScreen[dict | None]):
             yield Label("Spawn New Worker", classes="title")
             yield Label("Name:")
             yield Input(id="spawn-name", placeholder="my-worker")
+            yield Label("VM type (blank = regular):")
+            yield Input(id="spawn-vmtype", placeholder="regular | snp | tdx")
             yield Label("Model (blank = default):")
             yield Input(id="spawn-model", placeholder="claude-sonnet-4-5-20250514")
-            yield Label("Instance type (blank = default):")
-            yield Input(id="spawn-instance", placeholder="Standard_D2s_v5")
+            yield Label("Instance type (blank = auto):")
+            yield Input(id="spawn-instance", placeholder="auto from provider + vm type")
             yield Label("[Enter] spawn  [Escape] cancel")
 
     @on(Input.Submitted, "#spawn-name")
     def submit_name(self, event: Input.Submitted) -> None:
+        self.query_one("#spawn-vmtype", Input).focus()
+
+    @on(Input.Submitted, "#spawn-vmtype")
+    def submit_vmtype(self, event: Input.Submitted) -> None:
         self.query_one("#spawn-model", Input).focus()
 
     @on(Input.Submitted, "#spawn-model")
@@ -89,9 +95,13 @@ class SpawnDialog(ModalScreen[dict | None]):
         if not name:
             self.notify("Name is required", severity="error")
             return
+        vm_type = self.query_one("#spawn-vmtype", Input).value.strip() or None
+        if vm_type and vm_type not in ("regular", "snp", "tdx"):
+            self.notify("VM type must be regular, snp, or tdx", severity="error")
+            return
         model = self.query_one("#spawn-model", Input).value.strip() or None
         instance = self.query_one("#spawn-instance", Input).value.strip() or None
-        self.dismiss({"name": name, "model": model, "instance_type": instance})
+        self.dismiss({"name": name, "vm_type": vm_type, "model": model, "instance_type": instance})
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -359,10 +369,12 @@ class FleetTUI(App):
 
         detail = (
             f"[bold]{worker.name}[/bold]\n"
-            f"  IP:     {worker.ip or '—'}\n"
-            f"  Model:  {worker.model}\n"
-            f"  Repos:  {', '.join(worker.repos) if worker.repos else '—'}\n"
-            f"  Status: {worker.status}"
+            f"  Provider: {worker.provider}\n"
+            f"  VM Type:  {worker.vm_type}  SKU: {worker.instance_type}\n"
+            f"  IP:       {worker.ip or '—'}\n"
+            f"  Model:    {worker.model}\n"
+            f"  Repos:    {', '.join(worker.repos) if worker.repos else '—'}\n"
+            f"  Status:   {worker.status}"
             f"{prompt_display}"
         )
         self.query_one("#worker-detail", Static).update(detail)
@@ -389,7 +401,7 @@ class FleetTUI(App):
 
         ssh = WorkerSSH(
             ip=worker.ip,
-            user=self._config.cloud.ssh_user if self._config else "azureuser",
+            user=self._config.resolve_ssh_user() if self._config else "ubuntu",
             key_path=str(self._config.resolve_ssh_key()) if self._config else "~/.ssh/id_ed25519",
         )
 
@@ -460,13 +472,16 @@ class FleetTUI(App):
 
     @work(thread=True)
     def _do_spawn(self, params: dict) -> None:
+        from cfleet.config import VMType
         from cfleet.engine import FleetEngine
 
         try:
+            vm_type = VMType(params["vm_type"]) if params.get("vm_type") else None
             engine = FleetEngine(config=self._config)
             engine.spawn(
                 name=params["name"],
                 model=params.get("model"),
+                vm_type=vm_type,
                 instance_type=params.get("instance_type"),
             )
             self.call_from_thread(self.notify, f"Worker {params['name']} spawned")
@@ -515,7 +530,7 @@ class FleetTUI(App):
         from cfleet.ssh import WorkerSSH
 
         ssh_key = str(self._config.resolve_ssh_key()) if self._config else "~/.ssh/id_ed25519"
-        ssh_user = self._config.cloud.ssh_user if self._config else "azureuser"
+        ssh_user = self._config.resolve_ssh_user() if self._config else "ubuntu"
 
         with self.suspend():
             import subprocess

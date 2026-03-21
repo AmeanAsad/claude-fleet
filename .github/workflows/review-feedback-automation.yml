@@ -1,0 +1,115 @@
+name: Review Feedback Loop
+
+# When a PR is merged, scan its review comments for patterns that should be
+# captured in the skills repo. Also supports manual trigger and [capture-pattern]
+# tags in review comments.
+
+on:
+  # Auto-trigger when a PR is merged
+  pull_request:
+    types: [closed]
+
+  # Manual trigger with explicit pattern description
+  workflow_dispatch:
+    inputs:
+      pattern_description:
+        description: "Description of the review pattern to capture"
+        required: true
+        type: string
+      category:
+        description: "Category: security, correctness, performance, invariant-misclass, style"
+        required: true
+        type: choice
+        options:
+          - security
+          - correctness
+          - performance
+          - invariant-misclass
+          - style
+      source_pr:
+        description: "PR number where this pattern was found"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # Job 1: On PR merge, scan review comments for capturable patterns
+  scan-merged-pr:
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scan review comments for patterns
+        uses: anthropics/claude-code-action@v1
+        with:
+          model: claude-opus-4-6
+          prompt: |
+            A PR was just merged. Scan its review comments to find recurring patterns
+            that should be added to the team's review knowledge base.
+
+            PR number: ${{ github.event.pull_request.number }}
+            PR title: ${{ github.event.pull_request.title }}
+
+            Steps:
+            1. Use `gh api` to fetch all review comments on this PR.
+            2. Analyze the comments for substantive review findings (not just "LGTM" or style nits).
+            3. Look for comments tagged with `[capture-pattern]` -- these are explicit requests to capture.
+            4. For any significant finding or [capture-pattern] tag:
+               a. Clone the lunal-dev/skills repo.
+               b. Read the current review-patterns.md.
+               c. Check for duplicates -- if a similar pattern already exists, skip.
+               d. Draft a new pattern entry:
+                  ### [CATEGORY] -- [Short title]
+                  **Added:** [today's date]
+                  **Source:** PR #[number] in [repo]
+                  **Pattern:** [What to look for]
+                  **Why it matters:** [What goes wrong]
+                  **Example:** [BAD/GOOD code examples if applicable]
+                  **Checklist item:** [Which existing item catches this, or NEW]
+               e. Append to review-patterns.md under the correct category.
+               f. If NEW checklist item needed, also update code-review/checklist.md.
+               g. Create a branch, commit, push, and open a PR against lunal-dev/skills.
+            5. If no capturable patterns found, do nothing.
+
+            Use gh CLI for all GitHub operations.
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.SKILLS_REPO_TOKEN }}
+
+  # Job 2: Manual trigger with explicit pattern
+  capture-manual:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Capture pattern
+        uses: anthropics/claude-code-action@v1
+        with:
+          model: claude-opus-4-6
+          prompt: |
+            A human reviewer found a pattern that AI review missed. Capture it.
+
+            **Finding:** ${{ github.event.inputs.pattern_description }}
+            **Category:** ${{ github.event.inputs.category }}
+            **Source PR:** ${{ github.event.inputs.source_pr }}
+
+            Steps:
+            1. Clone the lunal-dev/skills repo.
+            2. Read the current review-patterns.md.
+            3. Check for duplicates -- if a similar pattern already exists, skip.
+            4. Draft a new pattern entry:
+               ### [CATEGORY] -- [Short title]
+               **Added:** [today's date]
+               **Source:** PR #[number]
+               **Pattern:** [What to look for]
+               **Why it matters:** [What goes wrong]
+               **Example:** [BAD/GOOD code examples if applicable]
+               **Checklist item:** [Which existing item catches this, or NEW]
+            5. Append to review-patterns.md under the correct category.
+            6. If NEW checklist item, also update code-review/checklist.md.
+            7. Create a branch, commit, push, and open a PR against lunal-dev/skills.
+            8. Output the PR URL.
+
+            Use gh CLI for all GitHub operations.
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.SKILLS_REPO_TOKEN }}

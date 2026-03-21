@@ -9,7 +9,12 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import logging
+
 import paramiko
+
+# Suppress paramiko's noisy transport-thread tracebacks during SSH polling
+logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 
 
 class WorkerSSH:
@@ -124,8 +129,12 @@ class WorkerSSH:
 
     def attach(self) -> None:
         """Attach to the worker's tmux session. Detaching lands on a bash shell."""
-        os.execvp(
-            "ssh",
+        # Set TERM to something the remote is guaranteed to have, avoiding
+        # "missing or unsuitable terminal" errors with exotic terminals like Ghostty.
+        env = os.environ.copy()
+        env["TERM"] = "xterm-256color"
+        os.execve(
+            "/usr/bin/ssh",
             [
                 "ssh",
                 "-t",
@@ -134,6 +143,7 @@ class WorkerSSH:
                 f"{self.user}@{self.ip}",
                 "tmux", "attach", "-t", "claude",
             ],
+            env,
         )
 
     def send_files(self, local_path: str, remote_path: str = "/workspace/inbox/") -> None:

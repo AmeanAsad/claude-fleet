@@ -7,7 +7,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from cfleet.config import DEFAULT_SKUS, FleetConfig, FleetState, VMType, WorkerState
+from cfleet.config import DEFAULT_SKUS, PROVIDER_DEFAULTS, FleetConfig, FleetState, VMType, WorkerState
 from cfleet.infra import InfraManager
 from cfleet.provisioner import bootstrap_worker
 from cfleet.ssh import WorkerSSH, wait_for_ssh
@@ -27,9 +27,10 @@ class FleetEngine:
         self.state.save()
 
     def _get_ssh(self, worker: WorkerState) -> WorkerSSH:
+        user = worker.ssh_user or self.config.resolve_ssh_user(provider=worker.provider)
         return WorkerSSH(
             ip=worker.ip,
-            user=self.config.cloud.ssh_user,
+            user=user,
             key_path=str(self.config.resolve_ssh_key()),
         )
 
@@ -91,15 +92,24 @@ class FleetEngine:
     # spawn
     # ------------------------------------------------------------------
 
-    def _validate_config(self) -> None:
+    def _validate_config(self, provider: str | None = None) -> None:
         """Ensure required config values are set before operating on infrastructure."""
         missing = []
         if not self.config.anthropic_api_key:
             missing.append("anthropic_api_key")
-        if not self.config.cloud.azure.subscription_id:
-            missing.append("cloud.azure.subscription_id")
-        if not self.config.cloud.azure.resource_group:
-            missing.append("cloud.azure.resource_group")
+        effective_provider = provider or self.config.cloud.provider
+        if not effective_provider:
+            missing.append("cloud.provider (set in config or pass --provider)")
+        elif effective_provider == "azure":
+            if not self.config.cloud.azure.subscription_id:
+                missing.append("cloud.azure.subscription_id")
+            if not self.config.cloud.azure.resource_group:
+                missing.append("cloud.azure.resource_group")
+        elif effective_provider == "gcp":
+            if not self.config.cloud.gcp.project_id:
+                missing.append("cloud.gcp.project_id")
+        if not self.config.resolve_ssh_user(provider=effective_provider):
+            missing.append("cloud.ssh_user")
         if missing:
             raise ValueError(
                 f"Missing required config: {', '.join(missing)}. "
@@ -114,30 +124,36 @@ class FleetEngine:
         vm_type: VMType | None = None,
         instance_type: str | None = None,
         region: str | None = None,
+        provider: str | None = None,
     ) -> WorkerState:
         """Spawn a new worker VM."""
-        self._validate_config()
+        provider_name = provider or self.config.cloud.provider
+        self._validate_config(provider=provider_name)
         if name in self.state.workers:
             raise ValueError(f"Worker '{name}' already exists. Kill it first or choose a different name.")
 
         effective_model = model or self.config.model
         effective_vm_type = vm_type or self.config.cloud.vm_type
-        # Explicit --instance-type overrides the vm_type default
-        effective_instance_type = instance_type or DEFAULT_SKUS[effective_vm_type]
+        effective_instance_type = instance_type or self.config.resolve_instance_type(
+            provider=provider_name, vm_type=effective_vm_type
+        )
         effective_repos = repos or [r.name for r in self.config.repos]
 
         console.print(
-            f"VM type: [bold]{effective_vm_type.value}[/bold] "
-            f"(SKU: {effective_instance_type})"
+            f"[bold]{provider_name}[/bold] | "
+            f"VM type: [bold]{effective_vm_type.value}[/bold] | "
+            f"SKU: [bold]{effective_instance_type}[/bold]"
         )
 
         # Create worker state
+        effective_ssh_user = self.config.resolve_ssh_user(provider=provider_name)
         worker = WorkerState(
             name=name,
             status="spawning",
-            provider=self.config.cloud.provider,
+            provider=provider_name,
             vm_type=effective_vm_type.value,
             instance_type=effective_instance_type,
+            ssh_user=effective_ssh_user,
             model=effective_model,
             repos=effective_repos,
         )
@@ -149,11 +165,16 @@ class FleetEngine:
         worker_cfg = {
             "instance_type": effective_instance_type,
             "vm_type": effective_vm_type.value,
+            "provider": provider_name,
         }
         if region:
-            worker_cfg["region"] = region
+            # For GCP, --region is treated as zone override
+            if provider_name == "gcp":
+                worker_cfg["zone"] = region
+            else:
+                worker_cfg["region"] = region
 
-        outputs = self.infra.add_worker(name, worker_cfg)
+        outputs = self.infra.add_worker(name, worker_cfg, provider=provider_name)
         ip = outputs.get(f"{name}_ip", "")
         if not ip:
             worker.status = "errored"
@@ -166,7 +187,7 @@ class FleetEngine:
 
         # 2. Wait for SSH
         console.print(f"Waiting for SSH on {ip}...")
-        wait_for_ssh(ip, self.config.cloud.ssh_user, str(self.config.resolve_ssh_key()))
+        wait_for_ssh(ip, effective_ssh_user, str(self.config.resolve_ssh_key()))
 
         # 3. Run Ansible bootstrap
         console.print(f"Provisioning [bold]{name}[/bold]...")
