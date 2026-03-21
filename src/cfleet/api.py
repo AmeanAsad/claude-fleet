@@ -145,11 +145,16 @@ async def _run_background_task(task_id: str, func):
         _prune_tasks()
 
 
-def _make_ssh(worker_name: str) -> WorkerSSH:
-    """Create a WorkerSSH for a given worker by reading state+config from disk."""
+def _make_conn(worker_name: str):
+    """Create a WorkerSSH or WorkerDocker for a given worker."""
     config = FleetConfig.load()
     state = FleetState.load()
     worker = state.get_worker(worker_name)
+    if worker.provider == "devcontainer":
+        if not worker.container_id:
+            raise ValueError(f"Worker '{worker_name}' has no container ID yet")
+        from cfleet.devcontainer import WorkerDocker
+        return WorkerDocker(container_id=worker.container_id)
     if not worker.ip:
         raise ValueError(f"Worker '{worker_name}' has no IP yet")
     return WorkerSSH(
@@ -197,32 +202,26 @@ def create_app() -> FastAPI:
         await _verify_token(request)
 
         def _status():
-            config = FleetConfig.load()
             state = FleetState.load()
             worker = state.get_worker(name)
             info = worker.model_dump()
-            if not worker.ip or worker.status in ("stopped", "spawning"):
+            reachable = (worker.ip or worker.container_id) and worker.status not in ("stopped", "spawning")
+            if not reachable:
                 info["tmux_alive"] = False
                 info["uptime"] = "N/A"
                 info["idle"] = False
                 return info
-            ssh = WorkerSSH(
-                ip=worker.ip,
-                user=config.resolve_ssh_user(),
-                key_path=str(config.resolve_ssh_key()),
-            )
+            conn = _make_conn(name)
             try:
-                # Single SSH command instead of 3 separate calls
                 combined = (
                     "tmux has-session -t claude 2>/dev/null && echo TMUX_OK || echo TMUX_DEAD; "
                     "uptime -p 2>/dev/null || echo unknown; "
                     "tmux capture-pane -t claude:code -p -S -5 2>/dev/null"
                 )
-                stdout, _, _ = ssh.exec(combined)
+                stdout, _, _ = conn.exec(combined)
                 lines = stdout.splitlines()
                 info["tmux_alive"] = len(lines) > 0 and lines[0] == "TMUX_OK"
                 info["uptime"] = lines[1].strip() if len(lines) > 1 else "unknown"
-                # Check remaining lines for idle prompt
                 pane_lines = [l.strip() for l in lines[2:] if l.strip()]
                 info["idle"] = any(
                     l == "\u276f" or l.startswith("\u276f ") for l in pane_lines
@@ -232,7 +231,7 @@ def create_app() -> FastAPI:
                 info["uptime"] = "unknown"
                 info["idle"] = False
             finally:
-                ssh.close()
+                conn.close()
             return info
 
         try:
@@ -311,7 +310,7 @@ def create_app() -> FastAPI:
         await _verify_token(request)
 
         def _read():
-            ssh = _make_ssh(name)
+            ssh = _make_conn(name)
             try:
                 return ssh.read_logs(lines)
             finally:
@@ -329,13 +328,13 @@ def create_app() -> FastAPI:
 
         # Validate worker exists before starting SSE
         try:
-            ssh = _make_ssh(name)
+            ssh = _make_conn(name)
             ssh.close()
         except (KeyError, ValueError) as e:
             raise HTTPException(status_code=404, detail=str(e))
 
         async def event_generator() -> AsyncGenerator[dict, None]:
-            ssh = _make_ssh(name)
+            ssh = _make_conn(name)
             seen_content = ""
             try:
                 while True:
@@ -357,7 +356,7 @@ def create_app() -> FastAPI:
                         yield {"event": "error", "data": json.dumps({"error": str(e)})}
                         # Reconnect on SSH failure
                         ssh.close()
-                        ssh = _make_ssh(name)
+                        ssh = _make_conn(name)
 
                     await asyncio.sleep(2.0)
             finally:

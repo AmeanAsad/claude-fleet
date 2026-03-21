@@ -11,7 +11,7 @@ from rich.table import Table
 
 app = typer.Typer(
     name="cfleet",
-    help="Orchestrate long-running Claude Code instances on cloud VMs.",
+    help="Orchestrate long-running Claude Code instances on cloud VMs or local containers.",
     no_args_is_help=True,
 )
 console = Console()
@@ -21,6 +21,20 @@ def _engine():
     """Lazy-load engine to avoid import overhead on --help."""
     from cfleet.engine import FleetEngine
     return FleetEngine()
+
+
+def _detect_default_provider() -> str:
+    """Auto-detect the best default provider based on what's installed.
+
+    Returns 'devcontainer' if no cloud CLI is found, otherwise the first
+    available cloud CLI.
+    """
+    import shutil as _shutil
+    if _shutil.which("az"):
+        return "azure"
+    if _shutil.which("gcloud"):
+        return "gcp"
+    return "devcontainer"
 
 
 # --------------------------------------------------------------------------
@@ -34,7 +48,7 @@ def init(
         help="Path to local fleet.yml init config (defaults to ./fleet.yml)",
     ),
 ):
-    """Create ~/.cfleet/ directory with example config, CLAUDE.md, skills/. Initialize Pulumi stack."""
+    """Create ~/.cfleet/ directory with example config, CLAUDE.md, skills/. Initialize stack."""
     import yaml as _yaml
     from pathlib import Path
     from cfleet.config import FleetConfig, FLEET_DIR, CONFIG_PATH, PROVIDER_DEFAULTS
@@ -75,8 +89,14 @@ def init(
 
     # --- Provider selection (must come first) ---
     if not config.cloud.provider:
-        provider = typer.prompt("Cloud provider", default="azure", show_choices=True,
-                                type=typer.Choice(["azure", "gcp"]))
+        # Auto-detect: if no cloud CLI is installed, default to devcontainer
+        default_provider = _detect_default_provider()
+        provider = typer.prompt(
+            "Provider",
+            default=default_provider,
+            show_choices=True,
+            type=typer.Choice(["devcontainer", "azure", "gcp"]),
+        )
         config.cloud.provider = provider
 
     # Apply provider defaults for any fields not explicitly set
@@ -118,8 +138,14 @@ def init(
             project_id = typer.prompt("GCP project ID")
             config.cloud.gcp.project_id = project_id
 
-    console.print(f"Provider: [bold]{provider}[/bold]  Region: [bold]{config.cloud.region}[/bold]  "
-                  f"SSH user: [bold]{config.cloud.ssh_user}[/bold]")
+    elif provider == "devcontainer":
+        console.print("[dim]Using local Docker containers — no cloud credentials needed.[/dim]")
+
+    if provider == "devcontainer":
+        console.print(f"Provider: [bold]{provider}[/bold]  (local Docker)")
+    else:
+        console.print(f"Provider: [bold]{provider}[/bold]  Region: [bold]{config.cloud.region}[/bold]  "
+                      f"SSH user: [bold]{config.cloud.ssh_user}[/bold]")
 
     engine = FleetEngine(config=config)
     engine.init()
@@ -137,13 +163,13 @@ def spawn(
     vm_type: Optional[str] = typer.Option(None, "--type", help="VM type: regular, snp, or tdx"),
     instance_type: Optional[str] = typer.Option(None, "--instance-type", "-t", help="Override machine type/SKU"),
     region: Optional[str] = typer.Option(None, "--region", help="Override default region"),
-    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Cloud provider: azure or gcp (defaults to config)"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Provider: devcontainer, azure, or gcp (defaults to config)"),
 ):
-    """Spawn a new fleet worker VM."""
+    """Spawn a new fleet worker."""
     from cfleet.config import VMType
 
-    if provider and provider not in ("azure", "gcp"):
-        console.print(f"[red]Invalid --provider '{provider}'. Choose: azure, gcp[/red]")
+    if provider and provider not in ("azure", "gcp", "devcontainer"):
+        console.print(f"[red]Invalid --provider '{provider}'. Choose: devcontainer, azure, gcp[/red]")
         raise typer.Exit(1)
 
     resolved_vm_type = None
@@ -182,21 +208,16 @@ def list_workers():
 
     # Live-check workers that claim to be "working" — update to idle if Claude
     # Code is actually at its prompt.
-    from cfleet.ssh import WorkerSSH
-
     state_dirty = False
     for w in workers:
-        if w.status == "working" and w.ip:
+        reachable = w.status == "working" and (w.ip or w.container_id)
+        if reachable:
             try:
-                ssh = WorkerSSH(
-                    ip=w.ip,
-                    user=w.ssh_user or engine.config.resolve_ssh_user(provider=w.provider),
-                    key_path=str(engine.config.resolve_ssh_key()),
-                )
-                if ssh.is_claude_idle():
+                conn = engine._get_conn(w)
+                if conn.is_claude_idle():
                     w.status = "idle"
                     state_dirty = True
-                ssh.close()
+                conn.close()
             except Exception as e:
                 console.print(f"[dim]Could not check {w.name}: {e}[/dim]")
     if state_dirty:
@@ -225,19 +246,22 @@ def list_workers():
         "regular": "white",
         "snp": "magenta",
         "tdx": "blue",
+        "container": "green",
     }
 
     for w in workers:
         color = status_colors.get(w.status, "white")
         vt_color = vm_type_colors.get(w.vm_type, "white")
         prompt_display = w.last_prompt[:50] + "..." if w.last_prompt and len(w.last_prompt) > 50 else (w.last_prompt or "—")
+        # Show container ID (truncated) for devcontainer, IP for cloud
+        target = w.ip or (w.container_id[:12] if w.container_id else "—")
         table.add_row(
             w.name,
             f"[{color}]{w.status}[/{color}]",
             w.provider,
             f"[{vt_color}]{w.vm_type}[/{vt_color}]",
             w.instance_type,
-            w.ip or "—",
+            target,
             w.model,
             prompt_display,
         )
@@ -331,10 +355,13 @@ def status(
 
     console.print(f"\n[bold]{info['name']}[/bold]")
     console.print(f"  Status:     {info['status']}")
+    console.print(f"  Provider:   {info['provider']}")
     console.print(f"  VM Type:    {info['vm_type']}")
     console.print(f"  SKU:        {info['instance_type']}")
-    console.print(f"  IP:         {info['ip'] or '—'}")
-    console.print(f"  Provider:   {info['provider']}")
+    if info['provider'] == "devcontainer":
+        console.print(f"  Container:  {info.get('container_id', '—')[:12] or '—'}")
+    else:
+        console.print(f"  IP:         {info['ip'] or '—'}")
     console.print(f"  Model:      {info['model']}")
     console.print(f"  Repos:      {', '.join(info['repos']) if info['repos'] else '—'}")
     console.print(f"  Tmux alive: {info.get('tmux_alive', '—')}")
