@@ -161,17 +161,33 @@ class InfraManager:
 
     def init_stack(self) -> None:
         """Initialize the Pulumi stack (creates if needed)."""
-        stack = self._get_stack()
-        # Set empty workers map if not present
-        try:
-            stack.get_config("claude-fleet:workers")
-        except auto.errors.CommandError:
-            stack.set_config(
-                "claude-fleet:workers", auto.ConfigValue(value=json.dumps({}))
-            )
+        self._get_stack()
 
-    def _sync_provider_configs(self, stack: auto.Stack, workers: dict) -> None:
-        """Set provider-specific Pulumi config for all providers used by workers."""
+    def _workers_from_state(self, exclude: str | None = None) -> dict:
+        """Build the Pulumi workers map from fleet state (the source of truth).
+
+        Pulumi inline workspaces use temp dirs, so set_config doesn't persist
+        between invocations. We always rebuild from fleet state instead.
+        """
+        state = FleetState.load()
+        workers = {}
+        for wname, w in state.workers.items():
+            if wname == exclude:
+                continue
+            if w.ip:  # Only include workers that Pulumi actually created
+                workers[wname] = {
+                    "instance_type": w.instance_type,
+                    "vm_type": w.vm_type,
+                    "provider": w.provider,
+                }
+        return workers
+
+    def _apply_config(self, stack: auto.Stack, workers: dict) -> None:
+        """Set all Pulumi config from fleet state before every up."""
+        stack.set_config(
+            "claude-fleet:workers", auto.ConfigValue(value=json.dumps(workers))
+        )
+        # Set provider configs for all providers in use
         used_providers = {w.get("provider", self.config.cloud.provider) for w in workers.values()}
         for provider_name in used_providers:
             provider = get_provider(provider_name)
@@ -180,50 +196,13 @@ class InfraManager:
                 config_key, auto.ConfigValue(value=json.dumps(provider_cfg))
             )
 
-    def _validate_workers_map(self, pulumi_workers: dict, expected_missing: str | None = None) -> None:
-        """Abort if the Pulumi workers map is missing any workers that exist in fleet state.
-
-        This prevents Pulumi from silently destroying workers that should still exist.
-        ``expected_missing`` is a worker name that is intentionally being removed (kill).
-        """
-        state = FleetState.load()
-        live_names = set(state.workers.keys())
-        if expected_missing:
-            live_names.discard(expected_missing)
-        pulumi_names = set(pulumi_workers.keys())
-        missing = live_names - pulumi_names
-        if missing:
-            raise RuntimeError(
-                f"Safety check failed: workers {missing} exist in fleet state but are "
-                f"missing from Pulumi workers map. This would destroy them. Aborting.\n"
-                f"If these workers are already gone, clean them from state with: "
-                f"cfleet kill <name> --force"
-            )
-
-    def _read_pulumi_workers(self, stack: auto.Stack) -> dict:
-        """Read the workers map from Pulumi config."""
-        try:
-            workers_raw = stack.get_config("claude-fleet:workers")
-            return json.loads(workers_raw.value)
-        except (auto.errors.CommandError, KeyError):
-            return {}
-
     def add_worker(self, name: str, worker_cfg: dict, provider: str | None = None) -> dict:
         """Add a worker to the Pulumi config and run up. Returns outputs."""
         stack = self._get_stack()
-        workers = self._read_pulumi_workers(stack)
-
+        workers = self._workers_from_state()
         workers[name] = worker_cfg
 
-        # Safety: ensure all state workers are still in the map before deploying
-        self._validate_workers_map(workers)
-
-        stack.set_config(
-            "claude-fleet:workers", auto.ConfigValue(value=json.dumps(workers))
-        )
-
-        # Set provider configs for all providers in use
-        self._sync_provider_configs(stack, workers)
+        self._apply_config(stack, workers)
 
         # Sync Pulumi state with actual cloud resources before deploying
         stack.refresh(on_output=lambda msg: None)
@@ -234,16 +213,9 @@ class InfraManager:
     def remove_worker(self, name: str) -> None:
         """Remove a worker from the Pulumi config and run up to destroy it."""
         stack = self._get_stack()
-        workers = self._read_pulumi_workers(stack)
+        workers = self._workers_from_state(exclude=name)
 
-        workers.pop(name, None)
-
-        # Safety: only the named worker should be removed, nothing else
-        self._validate_workers_map(workers, expected_missing=name)
-
-        stack.set_config(
-            "claude-fleet:workers", auto.ConfigValue(value=json.dumps(workers))
-        )
+        self._apply_config(stack, workers)
 
         stack.refresh(on_output=lambda msg: None)
         stack.up(on_output=lambda msg: None)
@@ -251,7 +223,5 @@ class InfraManager:
     def destroy_all(self) -> None:
         """Destroy all infrastructure."""
         stack = self._get_stack()
-        stack.set_config(
-            "claude-fleet:workers", auto.ConfigValue(value=json.dumps({}))
-        )
+        self._apply_config(stack, {})
         stack.up(on_output=lambda msg: None)
