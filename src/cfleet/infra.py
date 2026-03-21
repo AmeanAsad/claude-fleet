@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pulumi import automation as auto
 
-from cfleet.config import FleetConfig
+from cfleet.config import FleetConfig, FleetState
 from cfleet.infra_pulumi.__main__ import pulumi_program
 
 
@@ -180,16 +180,44 @@ class InfraManager:
                 config_key, auto.ConfigValue(value=json.dumps(provider_cfg))
             )
 
+    def _validate_workers_map(self, pulumi_workers: dict, expected_missing: str | None = None) -> None:
+        """Abort if the Pulumi workers map is missing any workers that exist in fleet state.
+
+        This prevents Pulumi from silently destroying workers that should still exist.
+        ``expected_missing`` is a worker name that is intentionally being removed (kill).
+        """
+        state = FleetState.load()
+        live_names = set(state.workers.keys())
+        if expected_missing:
+            live_names.discard(expected_missing)
+        pulumi_names = set(pulumi_workers.keys())
+        missing = live_names - pulumi_names
+        if missing:
+            raise RuntimeError(
+                f"Safety check failed: workers {missing} exist in fleet state but are "
+                f"missing from Pulumi workers map. This would destroy them. Aborting.\n"
+                f"If these workers are already gone, clean them from state with: "
+                f"cfleet kill <name> --force"
+            )
+
+    def _read_pulumi_workers(self, stack: auto.Stack) -> dict:
+        """Read the workers map from Pulumi config."""
+        try:
+            workers_raw = stack.get_config("claude-fleet:workers")
+            return json.loads(workers_raw.value)
+        except (auto.errors.CommandError, KeyError):
+            return {}
+
     def add_worker(self, name: str, worker_cfg: dict, provider: str | None = None) -> dict:
         """Add a worker to the Pulumi config and run up. Returns outputs."""
         stack = self._get_stack()
-        try:
-            workers_raw = stack.get_config("claude-fleet:workers")
-            workers = json.loads(workers_raw.value)
-        except (auto.errors.CommandError, KeyError):
-            workers = {}
+        workers = self._read_pulumi_workers(stack)
 
         workers[name] = worker_cfg
+
+        # Safety: ensure all state workers are still in the map before deploying
+        self._validate_workers_map(workers)
+
         stack.set_config(
             "claude-fleet:workers", auto.ConfigValue(value=json.dumps(workers))
         )
@@ -206,13 +234,13 @@ class InfraManager:
     def remove_worker(self, name: str) -> None:
         """Remove a worker from the Pulumi config and run up to destroy it."""
         stack = self._get_stack()
-        try:
-            workers_raw = stack.get_config("claude-fleet:workers")
-            workers = json.loads(workers_raw.value)
-        except (auto.errors.CommandError, KeyError):
-            return
+        workers = self._read_pulumi_workers(stack)
 
         workers.pop(name, None)
+
+        # Safety: only the named worker should be removed, nothing else
+        self._validate_workers_map(workers, expected_missing=name)
+
         stack.set_config(
             "claude-fleet:workers", auto.ConfigValue(value=json.dumps(workers))
         )
