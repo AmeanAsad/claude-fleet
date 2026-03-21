@@ -2,6 +2,14 @@
 # System dependencies — adapted from claude-dev reference role.
 # Installs everything needed for Claude Code to work on a fresh Ubuntu 24.04 VM.
 
+- name: Ensure universe repo is enabled and apt cache is fresh
+  ansible.builtin.shell: |
+    apt-get install -y software-properties-common 2>/dev/null || true
+    add-apt-repository -y universe 2>/dev/null || true
+    apt-get update -y
+  become: true
+  changed_when: true
+
 - name: Install system packages
   ansible.builtin.apt:
     name:
@@ -19,7 +27,6 @@
       - pkg-config
       - ncurses-bin
     state: present
-    update_cache: true
   become: true
 
 - name: Install Ghostty terminfo for xterm-ghostty support

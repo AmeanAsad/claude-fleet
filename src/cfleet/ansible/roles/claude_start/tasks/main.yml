@@ -12,6 +12,7 @@
 
 - name: Start tmux session with Claude Code and bash windows
   ansible.builtin.shell: |
+    export TERM=xterm-256color
     tmux new-session -d -s claude -n code -c {{ workspace_dir }}
     tmux send-keys -t claude:code 'source ~/.cfleet-env 2>/dev/null; source ~/.bashrc; claude --model {{ claude_model }} --dangerously-skip-permissions' Enter
     # Wait for Claude Code to start, then auto-accept trust dialog if it appears
