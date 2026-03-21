@@ -7,10 +7,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from cfleet.config import DEFAULT_SKUS, PROVIDER_DEFAULTS, FleetConfig, FleetState, VMType, WorkerState
-from cfleet.infra import InfraManager
-from cfleet.provisioner import bootstrap_worker
-from cfleet.ssh import WorkerSSH, wait_for_ssh
+from cfleet.config import CLOUD_PROVIDERS, DEFAULT_SKUS, PROVIDER_DEFAULTS, FleetConfig, FleetState, VMType, WorkerState
 
 console = Console()
 
@@ -21,12 +18,24 @@ class FleetEngine:
     def __init__(self, config: FleetConfig | None = None, state: FleetState | None = None):
         self.config = config or FleetConfig.load()
         self.state = state or FleetState.load()
-        self.infra = InfraManager(self.config)
+        self._infra = None  # Lazy — only needed for cloud providers
+
+    @property
+    def infra(self):
+        if self._infra is None:
+            from cfleet.infra import InfraManager
+            self._infra = InfraManager(self.config)
+        return self._infra
 
     def _save_state(self) -> None:
         self.state.save()
 
-    def _get_ssh(self, worker: WorkerState) -> WorkerSSH:
+    def _get_conn(self, worker: WorkerState):
+        """Return a WorkerSSH or WorkerDocker connection based on provider."""
+        if worker.provider == "devcontainer":
+            from cfleet.devcontainer import WorkerDocker
+            return WorkerDocker(container_id=worker.container_id)
+        from cfleet.ssh import WorkerSSH
         user = worker.ssh_user or self.config.resolve_ssh_user(provider=worker.provider)
         return WorkerSSH(
             ip=worker.ip,
@@ -39,19 +48,17 @@ class FleetEngine:
     # ------------------------------------------------------------------
 
     def init(self) -> None:
-        """Initialize ~/.cfleet/ directory and Pulumi stack."""
+        """Initialize ~/.cfleet/ directory and Pulumi stack (if cloud provider)."""
         from cfleet.config import FLEET_DIR, CONFIG_PATH
 
         FLEET_DIR.mkdir(parents=True, exist_ok=True)
         (FLEET_DIR / "skills").mkdir(exist_ok=True)
-        (FLEET_DIR / "pulumi-state").mkdir(exist_ok=True)
 
         # Save config (includes any values collected during init prompts)
         if not CONFIG_PATH.exists():
             self.config.save()
             console.print(f"[green]Created config at {CONFIG_PATH}[/green]")
         else:
-            # Update existing config with any newly prompted values
             self.config.save()
             console.print(f"[green]Updated config at {CONFIG_PATH}[/green]")
 
@@ -71,7 +78,6 @@ class FleetEngine:
                 f"ANTHROPIC_API_KEY={self.config.anthropic_api_key}\n"
             )
         elif self.config.anthropic_api_key:
-            # Update API key in existing secrets.env if it's still the placeholder
             content = secrets_env_path.read_text()
             if "ANTHROPIC_API_KEY=sk-ant-..." in content or "ANTHROPIC_API_KEY=\n" in content:
                 content = content.replace(
@@ -83,9 +89,20 @@ class FleetEngine:
                 )
                 secrets_env_path.write_text(content)
 
-        # Initialize Pulumi stack
-        console.print("Initializing Pulumi stack...")
-        self.infra.init_stack()
+        # Only init Pulumi if a cloud provider is configured
+        if self.config.cloud.provider in CLOUD_PROVIDERS:
+            (FLEET_DIR / "pulumi-state").mkdir(exist_ok=True)
+            console.print("Initializing Pulumi stack...")
+            self.infra.init_stack()
+
+        if self.config.cloud.provider == "devcontainer":
+            from cfleet.devcontainer import docker_available, build_image
+            if not docker_available():
+                console.print("[red]Docker is not available. Install Docker to use the devcontainer provider.[/red]")
+                return
+            console.print("Building devcontainer image...")
+            build_image()
+
         console.print("[green]Fleet initialized.[/green] Edit ~/.cfleet/config.yml to configure.")
 
     # ------------------------------------------------------------------
@@ -108,8 +125,11 @@ class FleetEngine:
         elif effective_provider == "gcp":
             if not self.config.cloud.gcp.project_id:
                 missing.append("cloud.gcp.project_id")
-        if not self.config.resolve_ssh_user(provider=effective_provider):
-            missing.append("cloud.ssh_user")
+        elif effective_provider == "devcontainer":
+            pass  # No cloud config needed
+        if effective_provider in CLOUD_PROVIDERS:
+            if not self.config.resolve_ssh_user(provider=effective_provider):
+                missing.append("cloud.ssh_user")
         if missing:
             raise ValueError(
                 f"Missing required config: {', '.join(missing)}. "
@@ -126,18 +146,79 @@ class FleetEngine:
         region: str | None = None,
         provider: str | None = None,
     ) -> WorkerState:
-        """Spawn a new worker VM."""
+        """Spawn a new worker (cloud VM or local container)."""
         provider_name = provider or self.config.cloud.provider
         self._validate_config(provider=provider_name)
         if name in self.state.workers:
             raise ValueError(f"Worker '{name}' already exists. Kill it first or choose a different name.")
 
         effective_model = model or self.config.model
+        effective_repos = repos or [r.name for r in self.config.repos]
+
+        if provider_name == "devcontainer":
+            return self._spawn_devcontainer(name, effective_model, effective_repos)
+
+        return self._spawn_cloud(
+            name, provider_name, effective_model, effective_repos,
+            vm_type, instance_type, region,
+        )
+
+    def _spawn_devcontainer(self, name: str, model: str, repo_names: list[str]) -> WorkerState:
+        """Spawn a worker as a local Docker container."""
+        from cfleet.devcontainer import docker_available, spawn_container
+
+        if not docker_available():
+            raise RuntimeError("Docker is not available. Install Docker to use the devcontainer provider.")
+
+        worker = WorkerState(
+            name=name,
+            status="spawning",
+            provider="devcontainer",
+            vm_type="container",
+            instance_type="docker",
+            ssh_user="vscode",
+            model=model,
+            repos=repo_names,
+        )
+        self.state.add_worker(worker)
+        self._save_state()
+
+        console.print(f"[bold]devcontainer[/bold] | Spawning container [bold]{name}[/bold]...")
+
+        repo_configs = [r.model_dump() for r in self.config.repos if r.name in repo_names]
+
+        container_id = spawn_container(
+            name=name,
+            anthropic_api_key=self.config.anthropic_api_key,
+            model=model,
+            repos=repo_configs,
+            fleet_config=self.config,
+        )
+
+        worker.container_id = container_id
+        worker.status = "idle"
+        self._save_state()
+        console.print(f"[green]Worker {name} ready (container {container_id[:12]})[/green]")
+        return worker
+
+    def _spawn_cloud(
+        self,
+        name: str,
+        provider_name: str,
+        model: str,
+        repo_names: list[str],
+        vm_type: VMType | None,
+        instance_type: str | None,
+        region: str | None,
+    ) -> WorkerState:
+        """Spawn a worker as a cloud VM via Pulumi + Ansible."""
+        from cfleet.provisioner import bootstrap_worker
+        from cfleet.ssh import wait_for_ssh
+
         effective_vm_type = vm_type or self.config.cloud.vm_type
         effective_instance_type = instance_type or self.config.resolve_instance_type(
             provider=provider_name, vm_type=effective_vm_type
         )
-        effective_repos = repos or [r.name for r in self.config.repos]
 
         console.print(
             f"[bold]{provider_name}[/bold] | "
@@ -145,7 +226,6 @@ class FleetEngine:
             f"SKU: [bold]{effective_instance_type}[/bold]"
         )
 
-        # Create worker state
         effective_ssh_user = self.config.resolve_ssh_user(provider=provider_name)
         worker = WorkerState(
             name=name,
@@ -154,8 +234,8 @@ class FleetEngine:
             vm_type=effective_vm_type.value,
             instance_type=effective_instance_type,
             ssh_user=effective_ssh_user,
-            model=effective_model,
-            repos=effective_repos,
+            model=model,
+            repos=repo_names,
         )
         self.state.add_worker(worker)
         self._save_state()
@@ -168,7 +248,6 @@ class FleetEngine:
             "provider": provider_name,
         }
         if region:
-            # For GCP, --region is treated as zone override
             if provider_name == "gcp":
                 worker_cfg["zone"] = region
             else:
@@ -192,12 +271,12 @@ class FleetEngine:
         # 3. Run Ansible bootstrap
         console.print(f"Provisioning [bold]{name}[/bold]...")
         repo_configs = [
-            r.model_dump() for r in self.config.repos if r.name in effective_repos
+            r.model_dump() for r in self.config.repos if r.name in repo_names
         ]
         bootstrap_worker(
             ip=ip,
             worker_name=name,
-            model=effective_model,
+            model=model,
             repos=repo_configs,
             fleet_config=self.config,
         )
@@ -213,27 +292,37 @@ class FleetEngine:
     # ------------------------------------------------------------------
 
     def kill(self, name: str, collect_path: str | None = None, force: bool = False) -> None:
-        """Destroy a worker VM."""
+        """Destroy a worker (VM or container)."""
         if name not in self.state.workers and not force:
             raise KeyError(f"Worker '{name}' not found.")
 
         worker = self.state.workers.get(name)
 
         # Optionally collect first
-        if collect_path and worker and worker.ip:
-            console.print(f"Collecting from {name}...")
-            self.collect(name, collect_path)
+        if collect_path and worker:
+            has_target = worker.ip or worker.container_id
+            if has_target:
+                console.print(f"Collecting from {name}...")
+                self.collect(name, collect_path)
 
-        # Remove from Pulumi
         console.print(f"Destroying [bold]{name}[/bold]...")
-        try:
-            self.infra.remove_worker(name)
-        except Exception as e:
-            if not force:
-                raise
-            console.print(f"[yellow]Warning: Pulumi destroy failed: {e}[/yellow]")
 
-        # Remove from state
+        if worker and worker.provider == "devcontainer":
+            from cfleet.devcontainer import kill_container
+            try:
+                kill_container(name)
+            except Exception as e:
+                if not force:
+                    raise
+                console.print(f"[yellow]Warning: Container removal failed: {e}[/yellow]")
+        else:
+            try:
+                self.infra.remove_worker(name)
+            except Exception as e:
+                if not force:
+                    raise
+                console.print(f"[yellow]Warning: Pulumi destroy failed: {e}[/yellow]")
+
         self.state.remove_worker(name)
         self._save_state()
         console.print(f"[green]Worker {name} destroyed.[/green]")
@@ -252,9 +341,9 @@ class FleetEngine:
     def ask(self, name: str, prompt: str) -> None:
         """Send a prompt to a worker. Fire and forget."""
         worker = self.state.get_worker(name)
-        ssh = self._get_ssh(worker)
-        ssh.send_prompt(prompt)
-        ssh.close()
+        conn = self._get_conn(worker)
+        conn.send_prompt(prompt)
+        conn.close()
 
         worker.last_prompt = prompt
         worker.last_prompt_at = datetime.now(timezone.utc).isoformat()
@@ -269,8 +358,8 @@ class FleetEngine:
     def attach(self, name: str) -> None:
         """Attach to a worker's tmux session. Replaces current process."""
         worker = self.state.get_worker(name)
-        ssh = self._get_ssh(worker)
-        ssh.attach()  # Does not return — replaces process
+        conn = self._get_conn(worker)
+        conn.attach()  # Does not return — replaces process
 
     # ------------------------------------------------------------------
     # send / collect
@@ -279,17 +368,17 @@ class FleetEngine:
     def send(self, name: str, local_path: str, remote_path: str = "/workspace/inbox/") -> None:
         """Send files to a worker."""
         worker = self.state.get_worker(name)
-        ssh = self._get_ssh(worker)
-        ssh.send_files(local_path, remote_path)
-        ssh.close()
+        conn = self._get_conn(worker)
+        conn.send_files(local_path, remote_path)
+        conn.close()
         console.print(f"Sent {local_path} to [bold]{name}[/bold]:{remote_path}")
 
     def collect(self, name: str, local_dest: str, remote_path: str = "/workspace/outbox/") -> None:
         """Collect files from a worker."""
         worker = self.state.get_worker(name)
-        ssh = self._get_ssh(worker)
-        ssh.collect(remote_path, local_dest)
-        ssh.close()
+        conn = self._get_conn(worker)
+        conn.collect(remote_path, local_dest)
+        conn.close()
         console.print(f"Collected {remote_path} from [bold]{name}[/bold] to {local_dest}")
 
     # ------------------------------------------------------------------
@@ -299,19 +388,19 @@ class FleetEngine:
     def logs(self, name: str, lines: int = 100, follow: bool = False) -> None:
         """Print worker tmux logs."""
         worker = self.state.get_worker(name)
-        ssh = self._get_ssh(worker)
+        conn = self._get_conn(worker)
 
         if follow:
             try:
-                for line in ssh.stream_logs():
+                for line in conn.stream_logs():
                     console.print(line)
             except KeyboardInterrupt:
                 pass
         else:
-            output = ssh.read_logs(lines=lines)
+            output = conn.read_logs(lines=lines)
             console.print(output)
 
-        ssh.close()
+        conn.close()
 
     # ------------------------------------------------------------------
     # status
@@ -322,14 +411,14 @@ class FleetEngine:
         worker = self.state.get_worker(name)
         info = worker.model_dump()
 
-        if worker.ip and worker.status not in ("stopped", "spawning"):
+        reachable = (worker.ip or worker.container_id) and worker.status not in ("stopped", "spawning")
+        if reachable:
             try:
-                ssh = self._get_ssh(worker)
-                info["tmux_alive"] = ssh.is_alive()
-                # Get uptime
-                stdout, _, _ = ssh.exec("uptime -p")
+                conn = self._get_conn(worker)
+                info["tmux_alive"] = conn.is_alive()
+                stdout, _, _ = conn.exec("uptime -p")
                 info["uptime"] = stdout.strip()
-                ssh.close()
+                conn.close()
             except Exception:
                 info["tmux_alive"] = False
                 info["uptime"] = "unknown"

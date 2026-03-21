@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pulumi import automation as auto
 
-from cfleet.config import FleetConfig, FleetState
+from cfleet.config import CLOUD_PROVIDERS, FleetConfig, FleetState
 from cfleet.infra_pulumi.__main__ import pulumi_program
 
 
@@ -174,6 +174,8 @@ class InfraManager:
         for wname, w in state.workers.items():
             if wname == exclude:
                 continue
+            if w.provider not in CLOUD_PROVIDERS:
+                continue  # Devcontainer workers are not managed by Pulumi
             if w.ip:  # Only include workers that Pulumi actually created
                 workers[wname] = {
                     "instance_type": w.instance_type,
