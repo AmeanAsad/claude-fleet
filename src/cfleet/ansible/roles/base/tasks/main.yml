@@ -17,9 +17,45 @@
       - unzip
       - libssl-dev
       - pkg-config
+      - ncurses-bin
     state: present
     update_cache: true
   become: true
+
+- name: Install Ghostty terminfo for xterm-ghostty support
+  ansible.builtin.shell: |
+    infocmp -x xterm-ghostty > /dev/null 2>&1
+  register: ghostty_terminfo_check
+  changed_when: false
+  failed_when: false
+  delegate_to: localhost
+  become: false
+
+- name: Copy Ghostty terminfo to remote host
+  when: ghostty_terminfo_check.rc == 0
+  block:
+    - name: Export Ghostty terminfo locally
+      ansible.builtin.shell: infocmp -x xterm-ghostty
+      delegate_to: localhost
+      become: false
+      register: ghostty_terminfo
+      changed_when: false
+
+    - name: Write terminfo source on remote
+      ansible.builtin.copy:
+        content: "{{ ghostty_terminfo.stdout }}"
+        dest: /tmp/ghostty.terminfo
+        mode: "0644"
+
+    - name: Compile Ghostty terminfo on remote
+      ansible.builtin.command: tic -x /tmp/ghostty.terminfo
+      become: true
+      changed_when: true
+
+    - name: Clean up terminfo source
+      ansible.builtin.file:
+        path: /tmp/ghostty.terminfo
+        state: absent
 
 - name: Check tmux version
   ansible.builtin.shell: tmux -V 2>/dev/null | grep -oP '[\d.]+' || echo "0"
