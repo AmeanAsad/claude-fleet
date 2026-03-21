@@ -1,18 +1,46 @@
 # Claude Fleet
 
-CLI for orchestrating long-running Claude Code instances on Azure VMs. Spawn workers, send prompts, stream logs, collect results — all over SSH + tmux + rsync.
+CLI for orchestrating long-running Claude Code instances on cloud VMs. Spawn workers on Azure or GCP, send prompts, stream logs, collect results — all over SSH + tmux + rsync.
 
 ## Prerequisites
 
-- Python 3.11+
-- [Pulumi CLI](https://www.pulumi.com/docs/install/)
-- Azure CLI (logged in via `az login`)
-- SSH key at `~/.ssh/id_ed25519`
-- `rsync`
+### Required
+
+| Tool | Version | Install | Purpose |
+|------|---------|---------|---------|
+| Python | 3.11+ | [python.org](https://www.python.org/downloads/) | Runtime |
+| Pulumi CLI | 3.x | `brew install pulumi` or [pulumi.com/docs/install](https://www.pulumi.com/docs/install/) | Infrastructure management |
+| SSH key | — | `ssh-keygen -t ed25519` | VM access |
+| rsync | — | Pre-installed on macOS/Linux | File transfer |
+| Ansible | 2.15+ | Installed as dependency | VM provisioning |
+
+### Cloud provider CLIs (install the ones you need)
+
+| Provider | CLI | Install | Auth |
+|----------|-----|---------|------|
+| **Azure** | `az` | `brew install azure-cli` or [docs](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) | `az login` |
+| **GCP** | `gcloud` | `brew install google-cloud-sdk` or [docs](https://cloud.google.com/sdk/docs/install) | `gcloud auth login && gcloud auth application-default login` |
+
+### GCP-specific setup
+
+- Enable the Compute Engine API: `gcloud services enable compute.googleapis.com`
+- Your account needs permissions to create VMs, networks, and firewalls
+
+### Azure-specific setup
+
+- Get your subscription ID: `az account show --query id -o tsv`
+- Your account needs permissions to create VMs, networking, and resource groups
 
 ## Install
 
 ```bash
+# With uv (recommended)
+git clone https://github.com/AmeanAsad/claude-fleet.git
+cd claude-fleet
+uv sync
+uv run cfleet --help
+
+# With pip
 git clone https://github.com/AmeanAsad/claude-fleet.git
 cd claude-fleet
 pip install -e .
@@ -21,7 +49,7 @@ pip install -e .
 ## Quickstart
 
 ```bash
-# 1. Configure — add your Anthropic API key and Azure subscription ID
+# 1. Configure — add your Anthropic API key and cloud provider details
 cp fleet.yml.example fleet.yml
 nano fleet.yml
 
@@ -47,13 +75,49 @@ cfleet collect dev ./output
 cfleet kill dev
 ```
 
+## Multi-provider support
+
+Both Azure and GCP can be configured simultaneously. Set a default provider in config and override per-worker:
+
+```bash
+# Uses default provider from config
+cfleet spawn worker1
+
+# Override provider for this worker
+cfleet spawn worker2 --provider gcp
+
+# Mix providers freely
+cfleet spawn worker3 -p gcp --type snp    # GCP confidential VM (AMD SEV-SNP)
+cfleet spawn worker4 -p azure --type tdx   # Azure confidential VM (Intel TDX)
+```
+
+### fleet.yml example
+
+```yaml
+anthropic_api_key: "sk-ant-..."
+
+cloud:
+  provider: azure           # default provider
+  azure:
+    subscription_id: "your-azure-subscription-id"
+  gcp:
+    project_id: "your-gcp-project-id"
+```
+
+### Default instance types
+
+| Provider | regular | snp (AMD SEV-SNP) | tdx (Intel TDX) |
+|----------|---------|---------------------|-----------------|
+| **Azure** | Standard_D2s_v5 | Standard_DC4as_v5 | Standard_DC4es_v6 |
+| **GCP** | e2-standard-2 | n2d-standard-2 | c3-standard-4 |
+
 ## Lifecycle
 
 ### 1. Initialize
 
 ```bash
 cp fleet.yml.example fleet.yml
-# Add your Anthropic API key and Azure subscription ID
+# Add your Anthropic API key and cloud provider details
 cfleet init
 ```
 
@@ -65,17 +129,18 @@ This creates `~/.cfleet/` with your config, secrets, and a Pulumi stack. If you 
 cfleet spawn my-worker
 ```
 
-This provisions an Azure VM, installs Claude Code, clones your repos, and starts a tmux session. The worker is ready when status shows `idle`.
+This provisions a cloud VM, installs Claude Code, clones your repos, and starts a tmux session. The worker is ready when status shows `idle`.
 
 Options:
 
 ```bash
 cfleet spawn my-worker \
-  --type snp \                         # regular | snp | tdx (confidential VMs)
-  --model claude-opus-4-6 \            # override default model
-  --instance-type Standard_DC8as_v5 \  # override Azure SKU
-  --repo myapp --repo infra \          # specific repos (default: all from config)
-  --region eastus                      # override default region
+  --provider gcp \                       # azure | gcp (default: config value)
+  --type snp \                           # regular | snp | tdx (confidential VMs)
+  --model claude-opus-4-6 \              # override default model
+  --instance-type n2d-standard-4 \       # override machine type/SKU
+  --repo myapp --repo infra \            # specific repos (default: all from config)
+  --region us-east1-b                    # override default region/zone
 ```
 
 ### 3. Send prompts
@@ -160,24 +225,31 @@ All config lives in `~/.cfleet/`:
 | `CLAUDE.md`        | System instructions for all workers                  |
 | `skills/`          | Custom skills synced to workers                      |
 | `mcp-servers.json` | MCP server config for workers                        |
-| `state.json`       | Worker inventory (auto-managed)                      |
+| `state.json`       | Worker inventory (auto-managed, single source of truth) |
+
+## Architecture
+
+- **State**: `~/.cfleet/state.json` is the single canonical source of truth for all worker state. Pulumi config is rebuilt from state on every operation — no drift, no silent destruction.
+- **Infra**: Pulumi inline program creates VMs, networking, and firewalls per provider. Workers from different providers coexist in the same stack.
+- **Provisioning**: Ansible bootstraps each VM with system packages, Node.js, Claude Code, tmux, repos, secrets, and skills.
+- **SSH**: All communication (attach, ask, logs, send, collect) goes over SSH. No agents or daemons on the VMs.
 
 ## Command Reference
 
-| Command                          | Description                          |
-| -------------------------------- | ------------------------------------ |
-| `cfleet init`                    | Set up `~/.cfleet/` and Pulumi stack |
-| `cfleet spawn <name>`            | Create a worker VM                   |
-| `cfleet ls`                      | List all workers                     |
-| `cfleet ask <name> "<prompt>"`   | Send a prompt (fire and forget)      |
-| `cfleet attach <name>`           | SSH into worker's tmux session       |
-| `cfleet logs <name> [-f] [-n N]` | Show/stream worker output            |
-| `cfleet status <name>`           | Detailed worker info                 |
-| `cfleet send <name> <path>`      | rsync files to worker                |
-| `cfleet collect <name> <dest>`   | rsync files from worker              |
-| `cfleet kill <name> [--all]`     | Destroy worker VM(s)                 |
-| `cfleet serve [--port N]`        | Start web dashboard + REST API       |
-| `cfleet tui`                     | Launch interactive TUI               |
+| Command | Description |
+| --- | --- |
+| `cfleet init` | Set up `~/.cfleet/` and Pulumi stack |
+| `cfleet spawn <name> [-p provider]` | Create a worker VM |
+| `cfleet ls` | List all workers |
+| `cfleet ask <name> "<prompt>"` | Send a prompt (fire and forget) |
+| `cfleet attach <name>` | SSH into worker's tmux session |
+| `cfleet logs <name> [-f] [-n N]` | Show/stream worker output |
+| `cfleet status <name>` | Detailed worker info |
+| `cfleet send <name> <path>` | rsync files to worker |
+| `cfleet collect <name> <dest>` | rsync files from worker |
+| `cfleet kill <name> [--all] [--force]` | Destroy worker VM(s) |
+| `cfleet serve [--port N]` | Start web dashboard + REST API |
+| `cfleet tui` | Launch interactive TUI |
 
 ## License
 
