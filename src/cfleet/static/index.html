@@ -274,8 +274,8 @@
       <input id="spawnModel" placeholder="claude-opus-4-6">
     </div>
     <div class="field">
-      <label>Instance Type (optional)</label>
-      <input id="spawnInstance" placeholder="Standard_D2s_v5">
+      <label>Instance Type (optional — auto from provider + vm type)</label>
+      <input id="spawnInstance" placeholder="auto">
     </div>
     <div class="actions">
       <button class="btn" id="spawnCancelBtn">Cancel</button>
@@ -404,7 +404,7 @@
   // --- Worker detail ---
 
   function buildInfoItem(label, value) {
-    return el('div', { className: 'info-item' }, [
+    return el('div', { className: 'info-item', 'data-field': label.toLowerCase() }, [
       el('div', { className: 'label' }, label),
       el('div', { className: 'value' }, value || '\u2014'),
     ]);
@@ -425,6 +425,7 @@
     var cached = workerCache[name] || {};
     infoPanel.appendChild(buildInfoItem('Name', cached.name || name));
     infoPanel.appendChild(buildInfoItem('Status', cached.status || '...'));
+    infoPanel.appendChild(buildInfoItem('Provider', cached.provider || '...'));
     infoPanel.appendChild(buildInfoItem('IP', cached.ip || '...'));
     infoPanel.appendChild(buildInfoItem('Model', cached.model || '...'));
     infoPanel.appendChild(buildInfoItem('VM Type', cached.vm_type || '...'));
@@ -460,6 +461,7 @@
       panel.replaceChildren();
       panel.appendChild(buildInfoItem('Name', info.name));
       panel.appendChild(buildInfoItem('Status', info.idle ? 'idle' : info.status));
+      panel.appendChild(buildInfoItem('Provider', info.provider));
       panel.appendChild(buildInfoItem('IP', info.ip));
       panel.appendChild(buildInfoItem('Model', info.model));
       panel.appendChild(buildInfoItem('VM Type', info.vm_type));
@@ -491,9 +493,9 @@
     logSource.addEventListener('status', function(e) {
       var data = JSON.parse(e.data);
       if (data.idle) {
-        var items = document.querySelectorAll('#workerInfo .info-item');
-        if (items.length > 1) {
-          var val = items[1].querySelector('.value');
+        var statusItem = document.querySelector('#workerInfo .info-item[data-field="status"]');
+        if (statusItem) {
+          var val = statusItem.querySelector('.value');
           if (val) val.textContent = 'idle';
         }
       }

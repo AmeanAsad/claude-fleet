@@ -19,11 +19,32 @@ class VMType(str, Enum):
     TDX = "tdx"
 
 
-# Default Azure SKUs per VM type
-DEFAULT_SKUS: dict[VMType, str] = {
-    VMType.REGULAR: "Standard_D2s_v5",
-    VMType.SNP: "Standard_DC4as_v5",
-    VMType.TDX: "Standard_DC4es_v6",
+# Default SKUs per provider and VM type
+DEFAULT_SKUS: dict[str, dict[VMType, str]] = {
+    "azure": {
+        VMType.REGULAR: "Standard_D2s_v5",
+        VMType.SNP: "Standard_DC4as_v5",
+        VMType.TDX: "Standard_DC4es_v6",
+    },
+    "gcp": {
+        VMType.REGULAR: "e2-standard-2",
+        VMType.SNP: "n2d-standard-2",
+        VMType.TDX: "c3-standard-4",
+    },
+}
+
+# Provider-specific defaults for fields that live on CloudConfig
+PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
+    "azure": {
+        "region": "westeurope",
+        "ssh_user": "ubuntu",
+        "instance_type": "Standard_D2s_v5",
+    },
+    "gcp": {
+        "region": "us-central1",
+        "ssh_user": "ubuntu",
+        "instance_type": "e2-standard-2",
+    },
 }
 
 
@@ -58,14 +79,26 @@ class AzureConfig(BaseModel):
     subnet: Optional[str] = None
 
 
+class GcpImageConfig(BaseModel):
+    project: str = "ubuntu-os-cloud"
+    family: str = "ubuntu-2404-lts-amd64"
+
+
+class GcpConfig(BaseModel):
+    project_id: str = ""
+    zone: str = "us-central1-a"
+    image: GcpImageConfig = GcpImageConfig()
+
+
 class CloudConfig(BaseModel):
-    provider: str = "azure"
-    region: str = "westeurope"
+    provider: str = ""
+    region: str = ""
     vm_type: VMType = VMType.REGULAR
-    instance_type: str = "Standard_D2s_v5"
+    instance_type: str = ""
     ssh_key: str = "~/.ssh/id_ed25519"
-    ssh_user: str = "azureuser"
+    ssh_user: str = ""
     azure: AzureConfig = AzureConfig()
+    gcp: GcpConfig = GcpConfig()
 
 
 class ApiConfig(BaseModel):
@@ -105,6 +138,32 @@ class FleetConfig(BaseModel):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(yaml.dump(self.model_dump(mode="json"), default_flow_style=False, sort_keys=False))
 
+    def resolve_provider_default(self, field: str) -> str:
+        """Get a provider-appropriate default for a CloudConfig field."""
+        defaults = PROVIDER_DEFAULTS.get(self.cloud.provider, {})
+        return defaults.get(field, "")
+
+    def resolve_ssh_user(self, provider: str | None = None) -> str:
+        p = provider or self.cloud.provider
+        # Global overrides only apply to the default provider
+        if self.cloud.ssh_user and p == self.cloud.provider:
+            return self.cloud.ssh_user
+        return PROVIDER_DEFAULTS.get(p, {}).get("ssh_user", "")
+
+    def resolve_region(self, provider: str | None = None) -> str:
+        p = provider or self.cloud.provider
+        if self.cloud.region and p == self.cloud.provider:
+            return self.cloud.region
+        return PROVIDER_DEFAULTS.get(p, {}).get("region", "")
+
+    def resolve_instance_type(self, provider: str | None = None, vm_type: VMType | None = None) -> str:
+        p = provider or self.cloud.provider
+        vt = vm_type or self.cloud.vm_type
+        if self.cloud.instance_type and p == self.cloud.provider:
+            return self.cloud.instance_type
+        skus = DEFAULT_SKUS.get(p, {})
+        return skus.get(vt, "")
+
     def resolve_ssh_key(self) -> Path:
         return Path(self.cloud.ssh_key).expanduser()
 
@@ -130,9 +189,10 @@ class WorkerState(BaseModel):
     name: str
     status: str = "spawning"  # spawning | provisioning | idle | working | errored | stopped
     ip: str = ""
-    provider: str = "azure"
+    provider: str = ""
     vm_type: str = "regular"  # regular | snp | tdx
     instance_type: str = ""
+    ssh_user: str = ""  # SSH user this worker was provisioned with
     model: str = ""
     repos: list[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())

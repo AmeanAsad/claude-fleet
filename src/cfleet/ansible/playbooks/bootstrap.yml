@@ -8,7 +8,7 @@
     workspace_dir: "{{ workspace_dir | default('/workspace') }}"
     anthropic_api_key: "{{ anthropic_api_key | default('') }}"
     claude_model: "{{ model | default('claude-sonnet-4-5-20250514') }}"
-    ssh_user: "{{ ansible_user | default('azureuser') }}"
+    ssh_user: "{{ ansible_user }}"
 
   tasks:
     - name: Include base role

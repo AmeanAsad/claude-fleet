@@ -5,6 +5,15 @@
 #   cfleet init
 
 anthropic_api_key: "sk-ant-..."
-cloud:
-  azure:
-    subscription_id: "your-azure-subscription-id"
+
+# cloud.provider sets the default for `cfleet spawn`.
+# You can configure BOTH providers and override per-worker with --provider:
+#   cfleet spawn worker1                    # uses default provider (azure)
+#   cfleet spawn worker2 --provider gcp     # uses gcp
+
+# cloud:
+#   provider: azure           # default provider
+#   azure:
+#     subscription_id: "your-azure-subscription-id"
+#   gcp:
+#     project_id: "your-gcp-project-id"

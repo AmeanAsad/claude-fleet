@@ -28,7 +28,7 @@ def bootstrap_worker(
     Uses ansible-runner to invoke the playbook programmatically.
     """
     ssh_key = str(fleet_config.resolve_ssh_key())
-    ssh_user = fleet_config.cloud.ssh_user
+    ssh_user = fleet_config.resolve_ssh_user()
 
     extravars = {
         "target_host": "all",

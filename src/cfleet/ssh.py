@@ -9,7 +9,12 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import logging
+
 import paramiko
+
+# Suppress paramiko's noisy transport-thread tracebacks during SSH polling
+logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 
 
 class WorkerSSH:

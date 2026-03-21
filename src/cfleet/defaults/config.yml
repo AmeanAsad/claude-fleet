@@ -31,18 +31,26 @@ pulumi:
   stack: default
   backend: "file://~/.cfleet/pulumi-state"
 
-# Cloud provider config
+# Cloud provider config — "azure" or "gcp" (set during cfleet init)
+# provider sets the default; override per-worker with: cfleet spawn <name> --provider gcp
+# Both azure and gcp sections can be configured simultaneously
 cloud:
-  provider: azure
-  region: westeurope
-  instance_type: Standard_D2s_v5
+  provider: ""
+  region: ""
+  instance_type: ""
   ssh_key: ~/.ssh/id_ed25519
-  ssh_user: azureuser
+  ssh_user: ""
   azure:
     subscription_id: ""
-    resource_group: fleet-workers
+    resource_group: ""
     image:
       publisher: Canonical
       offer: ubuntu-24_04-lts
       sku: server
       version: latest
+  gcp:
+    project_id: ""
+    zone: us-central1-a
+    image:
+      project: ubuntu-os-cloud
+      family: ubuntu-2404-lts-amd64

@@ -12,6 +12,7 @@ dependencies = [
     "pydantic",
     "pulumi",
     "pulumi-azure-native",
+    "pulumi-gcp",
     "ansible-runner",
     "watchfiles",
     "fastapi",

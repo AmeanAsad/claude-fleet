@@ -1,31 +1,26 @@
 """Pulumi program for Claude Fleet worker VMs.
 
-Reads a 'workers' config map and creates one Azure VM per entry.
-Networking infrastructure (vnet, subnet, NSG) is created per-region so workers
-can be deployed across different Azure regions within a single resource group.
+Reads a 'provider' config key and delegates to the appropriate provider-specific
+resource creation. Supports Azure and GCP.
 """
 
 import json
 from pathlib import Path
 
 import pulumi
-import pulumi_azure_native as azure
 
 
-def pulumi_program() -> None:
-    """Inline Pulumi program — called directly by the automation API."""
-    config = pulumi.Config("claude-fleet")
+def _read_ssh_pub_key(ssh_key_path: str) -> str:
+    pub_key_path = Path(f"{ssh_key_path}.pub").expanduser()
+    try:
+        return pub_key_path.read_text().strip()
+    except FileNotFoundError:
+        pulumi.log.warn(f"SSH public key not found at {pub_key_path}, using placeholder")
+        return "ssh-ed25519 PLACEHOLDER"
 
-    workers_raw = config.get("workers") or "{}"
-    workers = json.loads(workers_raw)
 
-    azure_cfg_raw = config.get("azure") or "{}"
-    azure_cfg = json.loads(azure_cfg_raw)
-
-    # If there's no azure config yet (e.g., during init), skip everything
-    if not azure_cfg:
-        pulumi.log.info("No azure config found, skipping resource creation")
-        return
+def _create_azure_resources(workers: dict, azure_cfg: dict) -> None:
+    import pulumi_azure_native as azure
 
     region = azure_cfg["region"]
     rg_name = azure_cfg["resource_group"]
@@ -34,17 +29,7 @@ def pulumi_program() -> None:
     default_instance_type = azure_cfg["instance_type"]
     image_cfg = azure_cfg["image"]
 
-    # Read SSH public key
-    pub_key_path = Path(f"{ssh_key_path}.pub").expanduser()
-    if pub_key_path.exists():
-        ssh_pub_key = pub_key_path.read_text().strip()
-    else:
-        pulumi.log.warn(f"SSH public key not found at {pub_key_path}, using placeholder")
-        ssh_pub_key = "ssh-ed25519 PLACEHOLDER"
-
-    # =========================================================================
-    # Shared resource group (location is just metadata for the RG itself)
-    # =========================================================================
+    ssh_pub_key = _read_ssh_pub_key(ssh_key_path)
 
     resource_group = azure.resources.ResourceGroup(
         "fleet-rg",
@@ -52,17 +37,12 @@ def pulumi_program() -> None:
         location=region,
     )
 
-    # =========================================================================
     # Per-region networking (vnet, subnet, NSG)
-    # =========================================================================
-
-    # Collect all regions needed by workers
-    needed_regions = {region}  # always include default region
+    needed_regions = {region}
     for worker_cfg in workers.values():
         needed_regions.add(worker_cfg.get("region", region))
 
-    # Use a /16 per region with different second octets to avoid overlap
-    region_nets: dict[str, tuple] = {}  # region -> (subnet, nsg)
+    region_nets: dict[str, tuple] = {}
     for idx, loc in enumerate(sorted(needed_regions)):
         suffix = loc.replace(" ", "").lower()
         prefix = f"10.{idx}.0.0/16"
@@ -97,7 +77,6 @@ def pulumi_program() -> None:
                     protocol="Tcp",
                     source_port_range="*",
                     destination_port_range="22",
-                    # TODO: lock to user's IP via --my-ip flag on fleet init
                     source_address_prefix="*",
                     destination_address_prefix="*",
                 ),
@@ -105,10 +84,6 @@ def pulumi_program() -> None:
         )
 
         region_nets[loc] = (subnet, nsg)
-
-    # =========================================================================
-    # Per-worker resources
-    # =========================================================================
 
     for name, worker_cfg in workers.items():
         instance_type = worker_cfg.get("instance_type", default_instance_type)
@@ -122,9 +97,7 @@ def pulumi_program() -> None:
             resource_group_name=resource_group.name,
             location=worker_location,
             public_ip_allocation_method="Static",
-            sku=azure.network.PublicIPAddressSkuArgs(
-                name="Standard",
-            ),
+            sku=azure.network.PublicIPAddressSkuArgs(name="Standard"),
         )
 
         nic = azure.network.NetworkInterface(
@@ -141,7 +114,6 @@ def pulumi_program() -> None:
             network_security_group=azure.network.NetworkSecurityGroupArgs(id=worker_nsg.id),
         )
 
-        # Confidential VM settings for SNP/TDX
         security_profile = None
         if vm_type in ("snp", "tdx"):
             security_profile = azure.compute.SecurityProfileArgs(
@@ -152,7 +124,6 @@ def pulumi_program() -> None:
                 ),
             )
 
-        # CVM images differ from regular — use confidential-capable Ubuntu image
         if vm_type in ("snp", "tdx"):
             vm_image_ref = azure.compute.ImageReferenceArgs(
                 publisher="Canonical",
@@ -168,7 +139,6 @@ def pulumi_program() -> None:
                 version=image_cfg["version"],
             )
 
-        # CVM requires VMGS-encrypted OS disk
         if vm_type in ("snp", "tdx"):
             os_disk = azure.compute.OSDiskArgs(
                 create_option="FromImage",
@@ -192,9 +162,7 @@ def pulumi_program() -> None:
         vm_args = dict(
             resource_group_name=resource_group.name,
             location=worker_location,
-            hardware_profile=azure.compute.HardwareProfileArgs(
-                vm_size=instance_type,
-            ),
+            hardware_profile=azure.compute.HardwareProfileArgs(vm_size=instance_type),
             network_profile=azure.compute.NetworkProfileArgs(
                 network_interfaces=[
                     azure.compute.NetworkInterfaceReferenceArgs(id=nic.id),
@@ -228,3 +196,129 @@ def pulumi_program() -> None:
 
         pulumi.export(f"{name}_ip", public_ip.ip_address)
         pulumi.export(f"{name}_id", vm.id)
+
+
+def _create_gcp_resources(workers: dict, gcp_cfg: dict) -> None:
+    import pulumi_gcp as gcp
+
+    project_id = gcp_cfg["project_id"]
+    default_zone = gcp_cfg["zone"]
+    region = gcp_cfg["region"]
+    ssh_user = gcp_cfg["ssh_user"]
+    ssh_key_path = gcp_cfg["ssh_key"]
+    default_instance_type = gcp_cfg["instance_type"]
+    image_cfg = gcp_cfg["image"]
+
+    ssh_pub_key = _read_ssh_pub_key(ssh_key_path)
+
+    # Shared VPC network and firewall
+    network = gcp.compute.Network(
+        "fleet-network",
+        project=project_id,
+        auto_create_subnetworks=False,
+    )
+
+    subnet = gcp.compute.Subnetwork(
+        "fleet-subnet",
+        project=project_id,
+        region=region,
+        network=network.id,
+        ip_cidr_range="10.0.1.0/24",
+    )
+
+    gcp.compute.Firewall(
+        "fleet-allow-ssh",
+        project=project_id,
+        network=network.id,
+        allows=[gcp.compute.FirewallAllowArgs(
+            protocol="tcp",
+            ports=["22"],
+        )],
+        source_ranges=["0.0.0.0/0"],
+        target_tags=["fleet-worker"],
+    )
+
+    for name, worker_cfg in workers.items():
+        instance_type = worker_cfg.get("instance_type", default_instance_type)
+        vm_type = worker_cfg.get("vm_type", "regular")
+        # Engine passes "region" as the override key; for GCP treat it as zone
+        worker_zone = worker_cfg.get("zone", worker_cfg.get("region", default_zone))
+
+        is_cvm = vm_type in ("snp", "tdx")
+        if is_cvm:
+            boot_image = "ubuntu-os-cloud/ubuntu-2204-lts"
+        else:
+            boot_image = f"{image_cfg['project']}/{image_cfg['family']}"
+
+        instance_args = dict(
+            project=project_id,
+            zone=worker_zone,
+            machine_type=instance_type,
+            boot_disk=gcp.compute.InstanceBootDiskArgs(
+                initialize_params=gcp.compute.InstanceBootDiskInitializeParamsArgs(
+                    image=boot_image,
+                    size=64,
+                    type="pd-ssd",
+                ),
+            ),
+            network_interfaces=[gcp.compute.InstanceNetworkInterfaceArgs(
+                subnetwork=subnet.id,
+                access_configs=[gcp.compute.InstanceNetworkInterfaceAccessConfigArgs()],
+            )],
+            metadata={
+                "ssh-keys": f"{ssh_user}:{ssh_pub_key}",
+            },
+            tags=["fleet-worker"],
+            labels={"fleet": "true", "worker": name, "vm-type": vm_type},
+        )
+
+        if is_cvm:
+            cvm_type = "SEV_SNP" if vm_type == "snp" else "TDX"
+            instance_args["confidential_instance_config"] = gcp.compute.InstanceConfidentialInstanceConfigArgs(
+                enable_confidential_compute=True,
+                confidential_instance_type=cvm_type,
+            )
+            instance_args["scheduling"] = gcp.compute.InstanceSchedulingArgs(
+                on_host_maintenance="TERMINATE",
+            )
+            if vm_type == "snp":
+                instance_args["min_cpu_platform"] = "AMD Milan"
+
+        instance = gcp.compute.Instance(f"{name}-vm", **instance_args)
+
+        pulumi.export(f"{name}_ip", instance.network_interfaces[0].access_configs[0].nat_ip)
+        pulumi.export(f"{name}_id", instance.id)
+
+
+def pulumi_program() -> None:
+    """Inline Pulumi program — called directly by the automation API."""
+    config = pulumi.Config("claude-fleet")
+
+    workers_raw = config.get("workers") or "{}"
+    workers = json.loads(workers_raw)
+
+    # Group workers by provider
+    azure_workers = {}
+    gcp_workers = {}
+    for name, w_cfg in workers.items():
+        w_provider = w_cfg.get("provider", "azure")
+        if w_provider == "gcp":
+            gcp_workers[name] = w_cfg
+        else:
+            azure_workers[name] = w_cfg
+
+    if azure_workers:
+        azure_cfg_raw = config.get("azure") or "{}"
+        azure_cfg = json.loads(azure_cfg_raw)
+        if not azure_cfg:
+            pulumi.log.warn("Azure workers requested but no azure config found")
+        else:
+            _create_azure_resources(azure_workers, azure_cfg)
+
+    if gcp_workers:
+        gcp_cfg_raw = config.get("gcp") or "{}"
+        gcp_cfg = json.loads(gcp_cfg_raw)
+        if not gcp_cfg:
+            pulumi.log.warn("GCP workers requested but no gcp config found")
+        else:
+            _create_gcp_resources(gcp_workers, gcp_cfg)

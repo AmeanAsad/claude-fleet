@@ -154,7 +154,7 @@ def _make_ssh(worker_name: str) -> WorkerSSH:
         raise ValueError(f"Worker '{worker_name}' has no IP yet")
     return WorkerSSH(
         ip=worker.ip,
-        user=config.cloud.ssh_user,
+        user=config.resolve_ssh_user(),
         key_path=str(config.resolve_ssh_key()),
     )
 
@@ -208,7 +208,7 @@ def create_app() -> FastAPI:
                 return info
             ssh = WorkerSSH(
                 ip=worker.ip,
-                user=config.cloud.ssh_user,
+                user=config.resolve_ssh_user(),
                 key_path=str(config.resolve_ssh_key()),
             )
             try:

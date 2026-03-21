@@ -29,6 +29,10 @@ class CloudProvider(ABC):
     def get_required_plugins(self) -> list[tuple[str, str]]:
         """Return list of (plugin_name, version) required by this provider."""
 
+    @abstractmethod
+    def get_worker_stack_config(self, fleet_config: FleetConfig) -> tuple[str, dict]:
+        """Return (config_key, config_dict) for the Pulumi stack."""
+
 
 class AzureProvider(CloudProvider):
     """Azure provider — uses pulumi-azure-native."""
@@ -36,18 +40,58 @@ class AzureProvider(CloudProvider):
     def get_pulumi_config(self, fleet_config: FleetConfig) -> dict[str, str]:
         azure = fleet_config.cloud.azure
         return {
-            "azure-native:location": fleet_config.cloud.region,
+            "azure-native:location": fleet_config.resolve_region(provider="azure"),
             "azure-native:subscriptionId": azure.subscription_id,
         }
 
     def get_required_plugins(self) -> list[tuple[str, str]]:
-        # Don't pin version — let Pulumi resolve
         return []
+
+    def get_worker_stack_config(self, fleet_config: FleetConfig) -> tuple[str, dict]:
+        azure = fleet_config.cloud.azure
+        cfg = {
+            "resource_group": azure.resource_group,
+            "region": fleet_config.resolve_region(provider="azure"),
+            "instance_type": fleet_config.resolve_instance_type(provider="azure"),
+            "ssh_user": fleet_config.resolve_ssh_user(provider="azure"),
+            "ssh_key": str(fleet_config.resolve_ssh_key()),
+            "image": azure.image.model_dump(),
+        }
+        return "claude-fleet:azure", cfg
+
+
+class GcpProvider(CloudProvider):
+    """GCP provider — uses pulumi-gcp."""
+
+    def get_pulumi_config(self, fleet_config: FleetConfig) -> dict[str, str]:
+        gcp = fleet_config.cloud.gcp
+        return {
+            "gcp:project": gcp.project_id,
+            "gcp:region": fleet_config.resolve_region(provider="gcp"),
+            "gcp:zone": gcp.zone,
+        }
+
+    def get_required_plugins(self) -> list[tuple[str, str]]:
+        return []
+
+    def get_worker_stack_config(self, fleet_config: FleetConfig) -> tuple[str, dict]:
+        gcp = fleet_config.cloud.gcp
+        cfg = {
+            "project_id": gcp.project_id,
+            "region": fleet_config.resolve_region(provider="gcp"),
+            "zone": gcp.zone,
+            "instance_type": fleet_config.resolve_instance_type(provider="gcp"),
+            "ssh_user": fleet_config.resolve_ssh_user(provider="gcp"),
+            "ssh_key": str(fleet_config.resolve_ssh_key()),
+            "image": gcp.image.model_dump(),
+        }
+        return "claude-fleet:gcp", cfg
 
 
 # Provider registry — add new providers here
 PROVIDERS: dict[str, type[CloudProvider]] = {
     "azure": AzureProvider,
+    "gcp": GcpProvider,
 }
 
 
@@ -65,7 +109,6 @@ class InfraManager:
 
     def __init__(self, fleet_config: FleetConfig):
         self.config = fleet_config
-        self.provider = get_provider(fleet_config.cloud.provider)
 
     def _get_stack(self) -> auto.Stack:
         project_name = self.config.pulumi.project
@@ -105,9 +148,14 @@ class InfraManager:
                 opts=ws_opts,
             )
 
-        # Set provider-specific config
-        for key, value in self.provider.get_pulumi_config(self.config).items():
-            stack.set_config(key, auto.ConfigValue(value=value))
+        # Set provider config for all configured providers
+        for provider_name in PROVIDERS:
+            provider = get_provider(provider_name)
+            try:
+                for key, value in provider.get_pulumi_config(self.config).items():
+                    stack.set_config(key, auto.ConfigValue(value=value))
+            except Exception:
+                pass  # Provider not configured, skip
 
         return stack
 
@@ -122,7 +170,17 @@ class InfraManager:
                 "claude-fleet:workers", auto.ConfigValue(value=json.dumps({}))
             )
 
-    def add_worker(self, name: str, worker_cfg: dict) -> dict:
+    def _sync_provider_configs(self, stack: auto.Stack, workers: dict) -> None:
+        """Set provider-specific Pulumi config for all providers used by workers."""
+        used_providers = {w.get("provider", self.config.cloud.provider) for w in workers.values()}
+        for provider_name in used_providers:
+            provider = get_provider(provider_name)
+            config_key, provider_cfg = provider.get_worker_stack_config(self.config)
+            stack.set_config(
+                config_key, auto.ConfigValue(value=json.dumps(provider_cfg))
+            )
+
+    def add_worker(self, name: str, worker_cfg: dict, provider: str | None = None) -> dict:
         """Add a worker to the Pulumi config and run up. Returns outputs."""
         stack = self._get_stack()
         try:
@@ -136,19 +194,8 @@ class InfraManager:
             "claude-fleet:workers", auto.ConfigValue(value=json.dumps(workers))
         )
 
-        # Set azure-specific config for the Pulumi program
-        azure = self.config.cloud.azure
-        azure_cfg = {
-            "resource_group": azure.resource_group,
-            "region": self.config.cloud.region,
-            "instance_type": self.config.cloud.instance_type,
-            "ssh_user": self.config.cloud.ssh_user,
-            "ssh_key": str(self.config.resolve_ssh_key()),
-            "image": azure.image.model_dump(),
-        }
-        stack.set_config(
-            "claude-fleet:azure", auto.ConfigValue(value=json.dumps(azure_cfg))
-        )
+        # Set provider configs for all providers in use
+        self._sync_provider_configs(stack, workers)
 
         # Sync Pulumi state with actual cloud resources before deploying
         stack.refresh(on_output=lambda msg: None)
