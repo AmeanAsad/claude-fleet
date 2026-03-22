@@ -7,10 +7,19 @@
 anthropic_api_key: "sk-ant-..."
 
 # cloud.provider sets the default for `cfleet spawn`.
-# You can configure BOTH providers and override per-worker with --provider:
-#   cfleet spawn worker1                    # uses default provider (azure)
-#   cfleet spawn worker2 --provider gcp     # uses gcp
+# Options: devcontainer (local Docker), azure, gcp
+# If omitted, `cfleet init` auto-detects: devcontainer if no cloud CLI is found.
+#
+# You can configure multiple providers and override per-worker with --provider:
+#   cfleet spawn worker1                          # uses default provider
+#   cfleet spawn worker2 --provider gcp           # uses gcp
+#   cfleet spawn worker3 --provider devcontainer  # local container
 
+# --- Local containers (no cloud needed, just Docker) ---
+# cloud:
+#   provider: devcontainer
+
+# --- Cloud providers ---
 # cloud:
 #   provider: azure           # default provider
 #   azure:

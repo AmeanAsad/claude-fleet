@@ -31,9 +31,10 @@ pulumi:
   stack: default
   backend: "file://~/.cfleet/pulumi-state"
 
-# Cloud provider config — "azure" or "gcp" (set during cfleet init)
+# Provider config — "devcontainer", "azure", or "gcp" (set during cfleet init)
+# "devcontainer" runs workers in local Docker containers (no cloud needed)
 # provider sets the default; override per-worker with: cfleet spawn <name> --provider gcp
-# Both azure and gcp sections can be configured simultaneously
+# Multiple providers can be configured simultaneously
 cloud:
   provider: ""
   region: ""

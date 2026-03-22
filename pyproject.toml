@@ -1,7 +1,7 @@
 [project]
 name = "claude-fleet"
 version = "0.1.0"
-description = "CLI + TUI for orchestrating long-running Claude Code instances on cloud VMs"
+description = "CLI + TUI for orchestrating long-running Claude Code instances on cloud VMs or local containers"
 requires-python = ">=3.11"
 dependencies = [
     "typer",
@@ -35,3 +35,4 @@ packages = ["src/cfleet"]
 "src/cfleet/ansible" = "cfleet/ansible"
 "src/cfleet/defaults" = "cfleet/defaults"
 "src/cfleet/static" = "cfleet/static"
+"src/cfleet/devcontainer" = "cfleet/devcontainer"

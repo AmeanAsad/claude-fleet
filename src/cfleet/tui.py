@@ -393,43 +393,38 @@ class FleetTUI(App):
         log_scroll = self.query_one("#log-panel", VerticalScroll)
 
         worker = self._state.workers.get(name)
-        if not worker or not worker.ip or worker.status in ("stopped", "spawning"):
+        reachable = worker and (worker.ip or worker.container_id) and worker.status not in ("stopped", "spawning")
+        if not reachable:
             log_widget.update("[dim]No logs available[/dim]")
             return
 
-        from cfleet.ssh import WorkerSSH
-
-        ssh = WorkerSSH(
-            ip=worker.ip,
-            user=self._config.resolve_ssh_user() if self._config else "ubuntu",
-            key_path=str(self._config.resolve_ssh_key()) if self._config else "~/.ssh/id_ed25519",
-        )
+        from cfleet.engine import FleetEngine
+        engine = FleetEngine(config=self._config)
+        conn = engine._get_conn(worker)
 
         seen_content = ""
         while self._selected_worker == name:
             try:
-                output = await asyncio.to_thread(ssh.read_logs, 80)
+                output = await asyncio.to_thread(conn.read_logs, 80)
                 if output != seen_content:
                     seen_content = output
-                    # Use Text() so raw terminal output isn't parsed as Rich markup
                     log_widget.update(Text(output.rstrip()))
                     log_scroll.scroll_end(animate=False)
 
-                # Check if Claude Code returned to idle
                 self._state = FleetState.load()
                 w = self._state.workers.get(name)
                 if w and w.status == "working":
-                    is_idle = await asyncio.to_thread(ssh.is_claude_idle)
+                    is_idle = await asyncio.to_thread(conn.is_claude_idle)
                     if is_idle:
                         w.status = "idle"
                         self._state.save()
-                        self._worker_snapshot = None  # force list rebuild
+                        self._worker_snapshot = None
                         self._refresh_workers()
             except Exception as e:
                 log_widget.update(f"[red]Connection error: {e}[/red]")
             await asyncio.sleep(3.0)
 
-        ssh.close()
+        conn.close()
 
     # ------------------------------------------------------------------
     # Prompt input
@@ -522,25 +517,28 @@ class FleetTUI(App):
             return
 
         worker = self._state.workers.get(name)
-        if not worker or not worker.ip:
-            self.notify("Worker has no IP", severity="warning")
+        if not worker or not (worker.ip or worker.container_id):
+            self.notify("Worker not reachable", severity="warning")
             return
-
-        # Suspend the TUI, attach via SSH, resume on detach
-        from cfleet.ssh import WorkerSSH
-
-        ssh_key = str(self._config.resolve_ssh_key()) if self._config else "~/.ssh/id_ed25519"
-        ssh_user = self._config.resolve_ssh_user() if self._config else "ubuntu"
 
         with self.suspend():
             import subprocess
-            subprocess.run([
-                "ssh", "-t",
-                "-i", ssh_key,
-                "-o", "StrictHostKeyChecking=no",
-                f"{ssh_user}@{worker.ip}",
-                "tmux", "attach", "-t", "claude",
-            ])
+            if worker.provider == "devcontainer":
+                subprocess.run([
+                    "docker", "exec", "-it", "-u", "vscode",
+                    worker.container_id,
+                    "tmux", "attach", "-t", "claude",
+                ])
+            else:
+                ssh_key = str(self._config.resolve_ssh_key()) if self._config else "~/.ssh/id_ed25519"
+                ssh_user = self._config.resolve_ssh_user() if self._config else "ubuntu"
+                subprocess.run([
+                    "ssh", "-t",
+                    "-i", ssh_key,
+                    "-o", "StrictHostKeyChecking=no",
+                    f"{ssh_user}@{worker.ip}",
+                    "tmux", "attach", "-t", "claude",
+                ])
 
     def action_send_files(self) -> None:
         """Send files to the selected worker."""

@@ -19,6 +19,9 @@ class VMType(str, Enum):
     TDX = "tdx"
 
 
+# Providers that require cloud infra (Pulumi + SSH)
+CLOUD_PROVIDERS = {"azure", "gcp"}
+
 # Default SKUs per provider and VM type
 DEFAULT_SKUS: dict[str, dict[VMType, str]] = {
     "azure": {
@@ -44,6 +47,11 @@ PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
         "region": "us-central1",
         "ssh_user": "ubuntu",
         "instance_type": "e2-standard-2",
+    },
+    "devcontainer": {
+        "region": "local",
+        "ssh_user": "vscode",
+        "instance_type": "docker",
     },
 }
 
@@ -193,6 +201,7 @@ class WorkerState(BaseModel):
     vm_type: str = "regular"  # regular | snp | tdx
     instance_type: str = ""
     ssh_user: str = ""  # SSH user this worker was provisioned with
+    container_id: str = ""  # Docker container ID (devcontainer provider only)
     model: str = ""
     repos: list[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
