@@ -198,3 +198,47 @@ def format_message(msg: dict) -> str:
             elif role == "system":
                 parts.append(f"[dim]{text}[/dim]")
             elif role == "result":
+                parts.append(f"[green]{text}[/green]")
+            else:
+                parts.append(text)
+        elif block_type == "ThinkingBlock":
+            thinking = block.get("thinking", "")
+            # Truncate long thinking blocks
+            if len(thinking) > 200:
+                thinking = thinking[:200] + "..."
+            parts.append(f"[dim italic]Thinking: {thinking}[/dim italic]")
+        elif block_type == "ToolUseBlock":
+            tool = block.get("tool_name", "?")
+            tool_input = block.get("tool_input", {})
+            # Show a compact summary
+            if tool == "Bash":
+                cmd = tool_input.get("command", "")
+                parts.append(f"[cyan]$ {cmd}[/cyan]")
+            elif tool in ("Read", "Write", "Edit"):
+                path = tool_input.get("file_path", "")
+                parts.append(f"[cyan]{tool}: {path}[/cyan]")
+            elif tool in ("Glob", "Grep"):
+                pattern = tool_input.get("pattern", "")
+                parts.append(f"[cyan]{tool}: {pattern}[/cyan]")
+            else:
+                parts.append(f"[cyan]{tool}[/cyan]")
+        elif block_type == "ToolResultBlock":
+            content = block.get("content", "")
+            is_error = block.get("is_error", False)
+            if is_error:
+                parts.append(f"[red]Error: {content[:200]}[/red]")
+            else:
+                # Tool results can be very long; truncate
+                if len(content) > 300:
+                    content = content[:300] + "..."
+                parts.append(f"[dim]{content}[/dim]")
+
+    # Add usage info if present
+    usage = msg.get("usage")
+    if usage and msg_type == "ResultMessage":
+        cost = msg.get("total_cost_usd", 0)
+        inp = usage.get("input_tokens", 0)
+        out = usage.get("output_tokens", 0)
+        parts.append(f"[dim]  tokens: {inp:,} in / {out:,} out | ${cost:.4f}[/dim]")
+
+    return "\n".join(parts) if parts else f"[dim]{msg_type}[/dim]"
