@@ -118,3 +118,48 @@ def _serialize_message(msg: Any) -> dict:
             d["usage"] = msg.usage
     elif msg_type == "SystemMessage":
         d["role"] = "system"
+        d["subtype"] = msg.subtype
+        d["content"] = [{"type": "TextBlock", "text": json.dumps(msg.data)}]
+    else:
+        d["role"] = "unknown"
+        d["raw"] = str(msg)
+
+    return d
+
+
+async def _run_agent(prompt: str, model: str, cwd: str) -> None:
+    """Run the Agent SDK query loop and store messages."""
+    from claude_code_sdk import query, ClaudeCodeOptions
+
+    state.status = "working"
+    state.current_prompt = prompt
+    state.error = None
+
+    # Record the user prompt as a message
+    user_msg = {
+        "type": "UserPrompt",
+        "role": "user",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "content": [{"type": "TextBlock", "text": prompt}],
+    }
+    state.add_message(user_msg)
+
+    kwargs = dict(
+        model=model,
+        cwd=cwd,
+        permission_mode="bypassPermissions",
+        allowed_tools=["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "WebFetch"],
+    )
+    if state.session_id:
+        kwargs["resume"] = state.session_id
+    options = ClaudeCodeOptions(**kwargs)
+
+    try:
+        async for message in query(prompt=prompt, options=options):
+            serialized = _serialize_message(message)
+            state.add_message(serialized)
+
+            # Track session ID from ResultMessage
+            msg_type = type(message).__name__
+            if msg_type == "ResultMessage":
+                state.session_id = message.session_id
