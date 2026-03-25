@@ -198,3 +198,207 @@ def _provision_container(
     _exec(f"mkdir -p /home/vscode/.claude")
     _exec(f"cat > /home/vscode/.claude/settings.json << 'CFLEET_EOF'\n{settings_json}\nCFLEET_EOF")
 
+    # Pre-accept onboarding
+    onboarding = json.dumps({
+        "hasCompletedOnboarding": True,
+        "hasAcknowledgedDisclaimer": True,
+        "effortCalloutDismissed": True,
+        "projects": {
+            "/workspace": {"hasTrustDialogAccepted": True, "allowedTools": []},
+            "/home/vscode": {"hasTrustDialogAccepted": True, "allowedTools": []},
+        },
+    })
+    _exec(f"cat > /home/vscode/.claude.json << 'CFLEET_EOF'\n{onboarding}\nCFLEET_EOF")
+
+    trust = json.dumps({
+        "hasCompletedOnboarding": True,
+        "hasTrustDialogAccepted": True,
+        "hasTrustDialogHooksAccepted": True,
+        "hasCompletedProjectOnboarding": True,
+    })
+    _exec(f"cat > /home/vscode/.claude/claude.json << 'CFLEET_EOF'\n{trust}\nCFLEET_EOF")
+
+    # Copy worker relay into the container
+    relay_src = Path(__file__).parent / "worker_relay.py"
+    _docker_cp(container_id, str(relay_src), "/opt/cfleet-relay.py", owner=user)
+
+    # Start the worker relay (replaces tmux-based Claude Code startup)
+    _exec(
+        f"nohup python3 /opt/cfleet-relay.py "
+        f"--port {RELAY_PORT} --host 0.0.0.0 "
+        f"--model {model} --cwd /workspace "
+        f"> /tmp/cfleet-relay.log 2>&1 &"
+    )
+
+    # Wait for relay to start
+    for _ in range(15):
+        time.sleep(1)
+        r = _run(
+            ["docker", "exec", "-u", user, container_id, "bash", "-c",
+             f"curl -sf http://127.0.0.1:{RELAY_PORT}/health"],
+            check=False,
+        )
+        if r.returncode == 0:
+            return
+    console.print("[yellow]Warning: Relay did not respond within 15s, continuing...[/yellow]")
+
+
+def _docker_cp(container_id: str, src: str, dest: str, owner: str | None = None) -> None:
+    """Copy a file or directory from host into the container."""
+    _run(["docker", "cp", src, f"{container_id}:{dest}"])
+    if owner:
+        _run(["docker", "exec", "-u", "root", container_id, "chown", "-R", f"{owner}:{owner}", dest])
+
+
+def kill_container(name: str) -> None:
+    """Stop and remove a fleet container."""
+    cname = f"cfleet-{name}"
+    _run(["docker", "rm", "-f", cname], check=False)
+
+
+def get_container_id(name: str) -> str:
+    """Get the container ID for a named worker."""
+    r = _run(
+        ["docker", "ps", "-q", "--filter", f"label={FLEET_LABEL}={name}"],
+        check=False,
+    )
+    return r.stdout.strip()
+
+
+# ---------------------------------------------------------------------------
+# WorkerDocker — same interface as WorkerSSH for engine interop
+# ---------------------------------------------------------------------------
+
+
+class WorkerDocker:
+    """Docker exec connection to a fleet worker container.
+
+    Mirrors the WorkerSSH interface so the engine can use either transparently.
+    Provides relay access for structured communication and legacy tmux methods
+    for backward compatibility.
+    """
+
+    def __init__(self, container_id: str, user: str = "vscode", relay_port: int = RELAY_PORT):
+        self.container_id = container_id
+        self.user = user
+        self.relay_port = relay_port
+
+    def close(self) -> None:
+        pass  # No persistent connection to close
+
+    def exec(self, cmd: str, timeout: int = 30) -> tuple[str, str, int]:
+        """Run a command, return (stdout, stderr, exit_code)."""
+        r = subprocess.run(
+            ["docker", "exec", "-u", self.user, self.container_id, "bash", "-c", cmd],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return r.stdout, r.stderr, r.returncode
+
+    # ------------------------------------------------------------------
+    # Relay management
+    # ------------------------------------------------------------------
+
+    def start_relay(self, model: str = "", cwd: str = "/workspace") -> None:
+        """Start the relay if not already running."""
+        _, _, exit_code = self.exec(f"curl -sf http://127.0.0.1:{self.relay_port}/health", timeout=5)
+        if exit_code == 0:
+            return
+
+        # Ensure relay script is present
+        relay_src = Path(__file__).parent / "worker_relay.py"
+        if relay_src.exists():
+            _docker_cp(self.container_id, str(relay_src), "/opt/cfleet-relay.py", owner=self.user)
+
+        model_arg = f"--model {model}" if model else ""
+        self.exec(
+            f"nohup python3 /opt/cfleet-relay.py "
+            f"--port {self.relay_port} --host 0.0.0.0 "
+            f"{model_arg} --cwd {cwd} "
+            f"> /tmp/cfleet-relay.log 2>&1 &",
+            timeout=10,
+        )
+        for _ in range(15):
+            time.sleep(1)
+            _, _, exit_code = self.exec(
+                f"curl -sf http://127.0.0.1:{self.relay_port}/health", timeout=5
+            )
+            if exit_code == 0:
+                return
+
+    def get_relay_client(self) -> RelayClient:
+        """Return a RelayClient connected to this container's relay."""
+        ip = _get_container_ip(self.container_id)
+        if not ip:
+            # Fallback: use docker exec to proxy (less efficient)
+            ip = "127.0.0.1"
+        return RelayClient(f"http://{ip}:{self.relay_port}")
+
+    # ------------------------------------------------------------------
+    # Legacy tmux methods (kept for migration from tmux-based workers)
+    # ------------------------------------------------------------------
+
+    def send_prompt(self, text: str) -> None:
+        """Inject text into the tmux claude session (legacy)."""
+        self.exec("tmux send-keys -t claude:code Escape")
+        time.sleep(0.5)
+        escaped = text.replace("'", "'\\''")
+        self.exec(f"tmux send-keys -t claude:code -l '{escaped}'")
+        self.exec("tmux send-keys -t claude:code Enter")
+
+    def read_logs(self, lines: int = 100) -> str:
+        """Capture recent tmux scrollback (legacy)."""
+        stdout, _, _ = self.exec(f"tmux capture-pane -t claude:code -p -S -{lines}")
+        return stdout
+
+    def stream_logs(self, interval: float = 2.0) -> Iterator[str]:
+        """Tail tmux output (legacy)."""
+        prev_output = ""
+        while True:
+            try:
+                output = self.read_logs(lines=200)
+                if output != prev_output:
+                    prev_lines = prev_output.splitlines()
+                    curr_lines = output.splitlines()
+                    overlap = 0
+                    if prev_lines:
+                        for i in range(len(curr_lines)):
+                            if curr_lines[i:i + len(prev_lines)] == prev_lines:
+                                overlap = i + len(prev_lines)
+                                break
+                    new_lines = curr_lines[overlap:]
+                    for line in new_lines:
+                        yield line
+                    prev_output = output
+            except Exception:
+                yield "[connection lost, retrying...]"
+            time.sleep(interval)
+
+    def is_claude_idle(self) -> bool:
+        """Check idle via tmux (legacy)."""
+        stdout, _, _ = self.exec("tmux capture-pane -t claude:code -p -S -5")
+        lines = [l.strip() for l in stdout.splitlines() if l.strip()]
+        return any(l == "\u276f" or l.startswith("\u276f ") for l in lines)
+
+    def is_alive(self) -> bool:
+        """Check if tmux session exists (legacy)."""
+        _, _, exit_code = self.exec("tmux has-session -t claude 2>/dev/null")
+        return exit_code == 0
+
+    def attach(self) -> None:
+        """Attach to the container with a bash shell for debugging."""
+        os.execvp(
+            "docker",
+            ["docker", "exec", "-it", "-u", self.user, self.container_id,
+             "bash", "-l"],
+        )
+
+    def send_files(self, local_path: str, remote_path: str = "/workspace/inbox/") -> None:
+        local = local_path.rstrip("/")
+        _docker_cp(self.container_id, local, remote_path, owner=self.user)
+
+    def collect(self, remote_path: str, local_path: str) -> None:
+        Path(local_path).mkdir(parents=True, exist_ok=True)
+        remote = remote_path.rstrip("/")
+        _run(["docker", "cp", f"{self.container_id}:{remote}/.", local_path])
