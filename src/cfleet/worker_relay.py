@@ -163,3 +163,58 @@ async def _run_agent(prompt: str, model: str, cwd: str) -> None:
             msg_type = type(message).__name__
             if msg_type == "ResultMessage":
                 state.session_id = message.session_id
+
+                # Track token usage
+                if message.usage:
+                    state.total_input_tokens += message.usage.get("input_tokens", 0)
+                    state.total_output_tokens += message.usage.get("output_tokens", 0)
+                    state.total_cache_read_tokens += message.usage.get("cache_read_input_tokens", 0)
+                    state.total_cache_creation_tokens += message.usage.get("cache_creation_input_tokens", 0)
+                if message.total_cost_usd:
+                    state.total_cost_usd = message.total_cost_usd
+
+        state.status = "idle"
+    except asyncio.CancelledError:
+        state.status = "idle"
+        state.add_message({
+            "type": "SystemEvent",
+            "role": "system",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "content": [{"type": "TextBlock", "text": "Agent interrupted."}],
+        })
+    except Exception as e:
+        state.status = "error"
+        state.error = str(e)
+        state.add_message({
+            "type": "SystemEvent",
+            "role": "system",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "content": [{"type": "TextBlock", "text": f"Error: {e}"}],
+        })
+
+
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+
+class PromptRequest(BaseModel):
+    prompt: str
+
+
+def create_relay_app(model: str = "", cwd: str = "/workspace") -> FastAPI:
+    effective_model = model or os.environ.get("CFLEET_MODEL", "claude-opus-4-6")
+
+    app = FastAPI(title="cfleet-worker-relay", version="0.1.0")
+
+    @app.get("/health")
+    async def health():
+        return {"ok": True, "status": state.status}
+
+    @app.get("/status")
+    async def get_status():
+        return {
+            "status": state.status,
+            "session_id": state.session_id,
+            "current_prompt": state.current_prompt,
+            "error": state.error,
+            "message_count": len(state.messages),
