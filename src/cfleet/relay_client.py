@@ -58,3 +58,73 @@ class RelayClient:
         """Get conversation history. Synchronous."""
         with httpx.Client(timeout=self.timeout) as client:
             r = client.get(
+                f"{self.base_url}/messages",
+                params={"offset": offset, "limit": limit},
+            )
+            r.raise_for_status()
+            return r.json()
+
+    def is_idle(self) -> bool:
+        """Check if the worker is idle."""
+        try:
+            status = self.get_status_sync()
+            return status.get("status") == "idle"
+        except (httpx.ConnectError, httpx.TimeoutException, OSError):
+            return False
+
+    def is_alive(self) -> bool:
+        """Check if the relay process is reachable."""
+        return self.health_check()
+
+    # ------------------------------------------------------------------
+    # Async methods (for API server and TUI)
+    # ------------------------------------------------------------------
+
+    async def send_prompt(self, prompt: str) -> dict:
+        """Send a prompt to the worker. Async."""
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            r = await client.post(f"{self.base_url}/prompt", json={"prompt": prompt})
+            r.raise_for_status()
+            return r.json()
+
+    async def get_status(self) -> dict:
+        """Get relay status. Async."""
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            r = await client.get(f"{self.base_url}/status")
+            r.raise_for_status()
+            return r.json()
+
+    async def get_messages(self, offset: int = 0, limit: int = 200) -> dict:
+        """Get conversation history. Async."""
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            r = await client.get(
+                f"{self.base_url}/messages",
+                params={"offset": offset, "limit": limit},
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def interrupt(self) -> dict:
+        """Interrupt the current agent run. Async."""
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            r = await client.post(f"{self.base_url}/interrupt")
+            r.raise_for_status()
+            return r.json()
+
+    async def stream_messages(self) -> AsyncIterator[dict]:
+        """Stream new messages via SSE. Yields parsed message dicts."""
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream(
+                "GET",
+                f"{self.base_url}/stream",
+                headers={"Accept": "text/event-stream"},
+            ) as response:
+                buffer = ""
+                event_type = ""
+                async for chunk in response.aiter_text():
+                    buffer += chunk
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        line = line.rstrip("\r")
+                        if line.startswith("event:"):
+                            event_type = line[6:].strip()
