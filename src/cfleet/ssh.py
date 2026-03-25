@@ -198,3 +198,118 @@ class WorkerSSH:
 
     def stream_logs(self, interval: float = 2.0) -> Iterator[str]:
         """Tail tmux output by polling (legacy). Yields new lines."""
+        prev_output = ""
+        while True:
+            try:
+                output = self.read_logs(lines=200)
+                if output != prev_output:
+                    prev_lines = prev_output.splitlines()
+                    curr_lines = output.splitlines()
+                    overlap = 0
+                    if prev_lines:
+                        for i in range(len(curr_lines)):
+                            if curr_lines[i:i + len(prev_lines)] == prev_lines:
+                                overlap = i + len(prev_lines)
+                                break
+                    new_lines = curr_lines[overlap:]
+                    for line in new_lines:
+                        yield line
+                    prev_output = output
+            except Exception:
+                yield "[connection lost, retrying...]"
+            time.sleep(interval)
+
+    def is_claude_idle(self) -> bool:
+        """Check if Claude Code is waiting for input (legacy)."""
+        stdout, _, _ = self.exec("tmux capture-pane -t claude:code -p -S -5")
+        lines = [l.strip() for l in stdout.splitlines() if l.strip()]
+        return any(l == "\u276f" or l.startswith("\u276f ") for l in lines)
+
+    def is_alive(self) -> bool:
+        """Check if tmux claude session exists (legacy)."""
+        _, _, exit_code = self.exec("tmux has-session -t claude 2>/dev/null")
+        return exit_code == 0
+
+    def attach(self) -> None:
+        """Attach to the worker via SSH bash shell."""
+        env = os.environ.copy()
+        env["TERM"] = "xterm-256color"
+        os.execve(
+            "/usr/bin/ssh",
+            [
+                "ssh",
+                "-t",
+                "-i", self.key_path,
+                "-o", "StrictHostKeyChecking=no",
+                f"{self.user}@{self.ip}",
+                "bash", "-l",
+            ],
+            env,
+        )
+
+    def send_files(self, local_path: str, remote_path: str = "/workspace/inbox/") -> None:
+        """rsync local files to worker, preserving directory name."""
+        local = local_path.rstrip("/")
+        subprocess.run(
+            [
+                "rsync", "-avz",
+                "--filter=:- .gitignore",
+                "-e", f"ssh -i {self.key_path} -o StrictHostKeyChecking=no",
+                local,
+                f"{self.user}@{self.ip}:{remote_path}/",
+            ],
+            check=True,
+        )
+
+    def collect(self, remote_path: str, local_path: str) -> None:
+        """rsync worker files to local, respecting .gitignore."""
+        Path(local_path).mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "rsync", "-avz",
+                "--filter=:- .gitignore",
+                "-e", f"ssh -i {self.key_path} -o StrictHostKeyChecking=no",
+                f"{self.user}@{self.ip}:{remote_path}/",
+                f"{local_path}/",
+            ],
+            check=True,
+        )
+
+
+def _forward(sock: socket.socket, chan: paramiko.Channel) -> None:
+    """Bidirectional forwarding between a socket and SSH channel."""
+    while True:
+        r, _, _ = select.select([sock, chan], [], [], 1.0)
+        if sock in r:
+            data = sock.recv(4096)
+            if not data:
+                break
+            chan.sendall(data)
+        if chan in r:
+            data = chan.recv(4096)
+            if not data:
+                break
+            sock.sendall(data)
+    sock.close()
+    chan.close()
+
+
+def wait_for_ssh(ip: str, user: str, key_path: str, timeout: int = 300, interval: int = 5) -> None:
+    """Poll until SSH is available. Raises TimeoutError."""
+    key = str(Path(key_path).expanduser())
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(ip, username=user, key_filename=key, timeout=10)
+            client.close()
+            return
+        except (
+            paramiko.ssh_exception.NoValidConnectionsError,
+            paramiko.ssh_exception.SSHException,
+            socket.timeout,
+            OSError,
+        ):
+            time.sleep(interval)
+    raise TimeoutError(f"SSH not available on {ip} after {timeout}s")
