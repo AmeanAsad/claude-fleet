@@ -1,4 +1,4 @@
-"""Core orchestration engine — ties infra, provisioner, and SSH together."""
+"""Core orchestration engine — ties infra, provisioner, relay, and SSH together."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 from rich.console import Console
 
 from cfleet.config import CLOUD_PROVIDERS, DEFAULT_SKUS, PROVIDER_DEFAULTS, FleetConfig, FleetState, VMType, WorkerState
+from cfleet.relay_client import RelayClient, format_message
 
 console = Console()
 
@@ -34,14 +35,27 @@ class FleetEngine:
         """Return a WorkerSSH or WorkerDocker connection based on provider."""
         if worker.provider == "devcontainer":
             from cfleet.devcontainer import WorkerDocker
-            return WorkerDocker(container_id=worker.container_id)
+            return WorkerDocker(
+                container_id=worker.container_id,
+                relay_port=worker.relay_port,
+            )
         from cfleet.ssh import WorkerSSH
         user = worker.ssh_user or self.config.resolve_ssh_user(provider=worker.provider)
         return WorkerSSH(
             ip=worker.ip,
             user=user,
             key_path=str(self.config.resolve_ssh_key()),
+            relay_port=worker.relay_port,
         )
+
+    def _get_relay(self, worker: WorkerState) -> RelayClient:
+        """Return a RelayClient for a worker."""
+        conn = self._get_conn(worker)
+        return conn.get_relay_client()
+
+    def _uses_relay(self, worker: WorkerState) -> bool:
+        """Check if a worker uses the Agent SDK relay (vs. legacy tmux)."""
+        return worker.communication_mode == "relay"
 
     # ------------------------------------------------------------------
     # init
@@ -179,6 +193,8 @@ class FleetEngine:
             ssh_user="vscode",
             model=model,
             repos=repo_names,
+            communication_mode="relay",
+            relay_port=self.config.worker_relay_port,
         )
         self.state.add_worker(worker)
         self._save_state()
@@ -236,6 +252,8 @@ class FleetEngine:
             ssh_user=effective_ssh_user,
             model=model,
             repos=repo_names,
+            communication_mode="relay",
+            relay_port=self.config.worker_relay_port,
         )
         self.state.add_worker(worker)
         self._save_state()
@@ -330,108 +348,3 @@ class FleetEngine:
     def kill_all(self, collect_path: str | None = None) -> None:
         """Kill all workers."""
         names = list(self.state.workers.keys())
-        for name in names:
-            dest = f"{collect_path}/{name}" if collect_path else None
-            self.kill(name, collect_path=dest, force=True)
-
-    # ------------------------------------------------------------------
-    # ask
-    # ------------------------------------------------------------------
-
-    def ask(self, name: str, prompt: str) -> None:
-        """Send a prompt to a worker. Fire and forget."""
-        worker = self.state.get_worker(name)
-        conn = self._get_conn(worker)
-        conn.send_prompt(prompt)
-        conn.close()
-
-        worker.last_prompt = prompt
-        worker.last_prompt_at = datetime.now(timezone.utc).isoformat()
-        worker.status = "working"
-        self._save_state()
-        console.print(f"Prompt sent to [bold]{name}[/bold].")
-
-    # ------------------------------------------------------------------
-    # attach
-    # ------------------------------------------------------------------
-
-    def attach(self, name: str) -> None:
-        """Attach to a worker's tmux session. Replaces current process."""
-        worker = self.state.get_worker(name)
-        conn = self._get_conn(worker)
-        conn.attach()  # Does not return — replaces process
-
-    # ------------------------------------------------------------------
-    # send / collect
-    # ------------------------------------------------------------------
-
-    def send(self, name: str, local_path: str, remote_path: str = "/workspace/inbox/") -> None:
-        """Send files to a worker."""
-        worker = self.state.get_worker(name)
-        conn = self._get_conn(worker)
-        conn.send_files(local_path, remote_path)
-        conn.close()
-        console.print(f"Sent {local_path} to [bold]{name}[/bold]:{remote_path}")
-
-    def collect(self, name: str, local_dest: str, remote_path: str = "/workspace/outbox/") -> None:
-        """Collect files from a worker."""
-        worker = self.state.get_worker(name)
-        conn = self._get_conn(worker)
-        conn.collect(remote_path, local_dest)
-        conn.close()
-        console.print(f"Collected {remote_path} from [bold]{name}[/bold] to {local_dest}")
-
-    # ------------------------------------------------------------------
-    # logs
-    # ------------------------------------------------------------------
-
-    def logs(self, name: str, lines: int = 100, follow: bool = False) -> None:
-        """Print worker tmux logs."""
-        worker = self.state.get_worker(name)
-        conn = self._get_conn(worker)
-
-        if follow:
-            try:
-                for line in conn.stream_logs():
-                    console.print(line)
-            except KeyboardInterrupt:
-                pass
-        else:
-            output = conn.read_logs(lines=lines)
-            console.print(output)
-
-        conn.close()
-
-    # ------------------------------------------------------------------
-    # status
-    # ------------------------------------------------------------------
-
-    def status(self, name: str) -> dict:
-        """Get detailed status for a worker."""
-        worker = self.state.get_worker(name)
-        info = worker.model_dump()
-
-        reachable = (worker.ip or worker.container_id) and worker.status not in ("stopped", "spawning")
-        if reachable:
-            try:
-                conn = self._get_conn(worker)
-                info["tmux_alive"] = conn.is_alive()
-                stdout, _, _ = conn.exec("uptime -p")
-                info["uptime"] = stdout.strip()
-                conn.close()
-            except Exception:
-                info["tmux_alive"] = False
-                info["uptime"] = "unknown"
-        else:
-            info["tmux_alive"] = False
-            info["uptime"] = "N/A"
-
-        return info
-
-    # ------------------------------------------------------------------
-    # ls (data only — formatting is in CLI)
-    # ------------------------------------------------------------------
-
-    def list_workers(self) -> list[WorkerState]:
-        """Return all workers."""
-        return list(self.state.workers.values())
