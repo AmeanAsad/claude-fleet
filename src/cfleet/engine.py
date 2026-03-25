@@ -348,3 +348,83 @@ class FleetEngine:
     def kill_all(self, collect_path: str | None = None) -> None:
         """Kill all workers."""
         names = list(self.state.workers.keys())
+        for name in names:
+            dest = f"{collect_path}/{name}" if collect_path else None
+            self.kill(name, collect_path=dest, force=True)
+
+    # ------------------------------------------------------------------
+    # ask
+    # ------------------------------------------------------------------
+
+    def ask(self, name: str, prompt: str) -> None:
+        """Send a prompt to a worker. Fire and forget."""
+        worker = self.state.get_worker(name)
+
+        if self._uses_relay(worker):
+            relay = self._get_relay(worker)
+            relay.send_prompt_sync(prompt)
+        else:
+            conn = self._get_conn(worker)
+            conn.send_prompt(prompt)
+            conn.close()
+
+        worker.last_prompt = prompt
+        worker.last_prompt_at = datetime.now(timezone.utc).isoformat()
+        worker.status = "working"
+        self._save_state()
+        console.print(f"Prompt sent to [bold]{name}[/bold].")
+
+    # ------------------------------------------------------------------
+    # interrupt
+    # ------------------------------------------------------------------
+
+    def interrupt(self, name: str) -> None:
+        """Interrupt the current agent run on a worker."""
+        worker = self.state.get_worker(name)
+        if not self._uses_relay(worker):
+            console.print("[yellow]Interrupt is only supported for relay workers.[/yellow]")
+            return
+        relay = self._get_relay(worker)
+        relay.interrupt_sync()
+        worker.status = "idle"
+        self._save_state()
+        console.print(f"Interrupted [bold]{name}[/bold].")
+
+    # ------------------------------------------------------------------
+    # attach
+    # ------------------------------------------------------------------
+
+    def attach(self, name: str) -> None:
+        """Attach to a worker's shell. Replaces current process."""
+        worker = self.state.get_worker(name)
+        conn = self._get_conn(worker)
+        conn.attach()  # Does not return — replaces process
+
+    # ------------------------------------------------------------------
+    # send / collect
+    # ------------------------------------------------------------------
+
+    def send(self, name: str, local_path: str, remote_path: str = "/workspace/inbox/") -> None:
+        """Send files to a worker."""
+        worker = self.state.get_worker(name)
+        conn = self._get_conn(worker)
+        conn.send_files(local_path, remote_path)
+        conn.close()
+        console.print(f"Sent {local_path} to [bold]{name}[/bold]:{remote_path}")
+
+    def collect(self, name: str, local_dest: str, remote_path: str = "/workspace/outbox/") -> None:
+        """Collect files from a worker."""
+        worker = self.state.get_worker(name)
+        conn = self._get_conn(worker)
+        conn.collect(remote_path, local_dest)
+        conn.close()
+        console.print(f"Collected {remote_path} from [bold]{name}[/bold] to {local_dest}")
+
+    # ------------------------------------------------------------------
+    # logs
+    # ------------------------------------------------------------------
+
+    def logs(self, name: str, lines: int = 100, follow: bool = False) -> None:
+        """Print worker logs — structured messages from relay, or raw tmux output."""
+        worker = self.state.get_worker(name)
+
