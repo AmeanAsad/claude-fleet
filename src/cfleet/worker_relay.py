@@ -218,3 +218,48 @@ def create_relay_app(model: str = "", cwd: str = "/workspace") -> FastAPI:
             "current_prompt": state.current_prompt,
             "error": state.error,
             "message_count": len(state.messages),
+            "total_input_tokens": state.total_input_tokens,
+            "total_output_tokens": state.total_output_tokens,
+            "total_cache_read_tokens": state.total_cache_read_tokens,
+            "total_cache_creation_tokens": state.total_cache_creation_tokens,
+            "total_cost_usd": state.total_cost_usd,
+        }
+
+    @app.post("/prompt")
+    async def send_prompt(req: PromptRequest):
+        if state.status == "working":
+            raise HTTPException(status_code=409, detail="Agent is already working. Interrupt first.")
+        state._task = asyncio.create_task(_run_agent(req.prompt, effective_model, cwd))
+        return {"ok": True, "status": "working"}
+
+    @app.post("/interrupt")
+    async def interrupt():
+        if state._task and not state._task.done():
+            state._task.cancel()
+            return {"ok": True, "status": "interrupted"}
+        return {"ok": True, "status": "not_running"}
+
+    @app.get("/messages")
+    async def get_messages(offset: int = 0, limit: int = 200):
+        msgs = state.messages[offset:offset + limit]
+        return {
+            "messages": msgs,
+            "total": len(state.messages),
+            "offset": offset,
+        }
+
+    @app.get("/stream")
+    async def stream_messages():
+        """SSE stream of new messages as they arrive."""
+        queue = state.subscribe()
+
+        async def event_generator():
+            try:
+                while True:
+                    try:
+                        msg = await asyncio.wait_for(queue.get(), timeout=30.0)
+                        yield {"event": "message", "data": json.dumps(msg)}
+                    except asyncio.TimeoutError:
+                        yield {
+                            "event": "keepalive",
+                            "data": json.dumps({"status": state.status}),
