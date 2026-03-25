@@ -263,3 +263,33 @@ def create_relay_app(model: str = "", cwd: str = "/workspace") -> FastAPI:
                         yield {
                             "event": "keepalive",
                             "data": json.dumps({"status": state.status}),
+                        }
+            finally:
+                state.unsubscribe(queue)
+
+        return EventSourceResponse(event_generator())
+
+    return app
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    import argparse
+    import uvicorn
+
+    parser = argparse.ArgumentParser(description="cfleet worker relay")
+    parser.add_argument("--port", type=int, default=8421)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--model", default="")
+    parser.add_argument("--cwd", default="/workspace")
+    args = parser.parse_args()
+
+    app = create_relay_app(model=args.model, cwd=args.cwd)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()
