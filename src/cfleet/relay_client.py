@@ -128,3 +128,73 @@ class RelayClient:
                         line = line.rstrip("\r")
                         if line.startswith("event:"):
                             event_type = line[6:].strip()
+                        elif line.startswith("data:"):
+                            data = line[5:].strip()
+                            if event_type == "message" and data:
+                                try:
+                                    yield json.loads(data)
+                                except json.JSONDecodeError:
+                                    pass
+                            event_type = ""
+                        elif line == "":
+                            event_type = ""
+
+    # ------------------------------------------------------------------
+    # Sync streaming (for CLI `logs -f`)
+    # ------------------------------------------------------------------
+
+    def stream_messages_sync(self) -> Iterator[dict]:
+        """Stream new messages via SSE. Synchronous iterator for CLI use."""
+        with httpx.Client(timeout=None) as client:
+            with client.stream(
+                "GET",
+                f"{self.base_url}/stream",
+                headers={"Accept": "text/event-stream"},
+            ) as response:
+                buffer = ""
+                event_type = ""
+                for chunk in response.iter_text():
+                    buffer += chunk
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        line = line.rstrip("\r")
+                        if line.startswith("event:"):
+                            event_type = line[6:].strip()
+                        elif line.startswith("data:"):
+                            data = line[5:].strip()
+                            if event_type == "message" and data:
+                                try:
+                                    yield json.loads(data)
+                                except json.JSONDecodeError:
+                                    pass
+                                event_type = ""
+                        elif line == "":
+                            event_type = ""
+
+
+def format_message(msg: dict) -> str:
+    """Format a structured message for terminal display.
+
+    Used by CLI `logs` and TUI log panel.
+    """
+    role = msg.get("role", "unknown")
+    msg_type = msg.get("type", "")
+
+    # Skip noisy system init messages
+    if msg_type == "SystemMessage" and msg.get("subtype") == "init":
+        return ""
+
+    content_blocks = msg.get("content", [])
+    parts: list[str] = []
+
+    for block in content_blocks:
+        block_type = block.get("type", "")
+        if block_type == "TextBlock":
+            text = block.get("text", "")
+            if role == "user":
+                parts.append(f"[bold cyan]You:[/bold cyan] {text}")
+            elif role == "assistant":
+                parts.append(text)
+            elif role == "system":
+                parts.append(f"[dim]{text}[/dim]")
+            elif role == "result":
