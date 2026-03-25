@@ -18,6 +18,8 @@ from pathlib import Path
 
 from rich.console import Console
 
+from cfleet.relay_client import RelayClient
+
 console = Console()
 
 # Container image name for fleet workers
@@ -26,6 +28,9 @@ FLEET_DOCKERFILE = Path(__file__).parent / "devcontainer" / "Dockerfile"
 
 # Labels applied to every fleet container for identification
 FLEET_LABEL = "cfleet.worker"
+
+# Default relay port inside containers
+RELAY_PORT = 8421
 
 
 def _run(cmd: list[str], check: bool = True, capture: bool = True, **kwargs) -> subprocess.CompletedProcess:
@@ -60,6 +65,16 @@ def build_image(force: bool = False) -> None:
     )
 
 
+def _get_container_ip(container_id: str) -> str:
+    """Get the container's IP address on the Docker bridge network."""
+    r = _run([
+        "docker", "inspect", "-f",
+        "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+        container_id,
+    ], check=False)
+    return r.stdout.strip()
+
+
 def spawn_container(
     name: str,
     anthropic_api_key: str,
@@ -74,6 +89,7 @@ def spawn_container(
     env = {
         "ANTHROPIC_API_KEY": anthropic_api_key,
         "CLAUDE_CODE_API_KEY": anthropic_api_key,
+        "CFLEET_MODEL": model,
     }
 
     # Read additional secrets from secrets.env
@@ -118,7 +134,7 @@ def _provision_container(
     repos: list[dict],
     fleet_config,
 ) -> None:
-    """Set up workspace, repos, claude config, tmux inside the container."""
+    """Set up workspace, repos, claude config, and relay inside the container."""
     user = "vscode"
 
     def _exec(cmd: str, user: str = user) -> str:
@@ -163,12 +179,16 @@ def _provision_container(
         _docker_cp(container_id, str(mcp_config), "/home/vscode/.claude/mcp-servers.json", owner=user)
 
     # Claude Code settings
+    # Store API key in a file and use cat to read it (avoids shell injection via echo)
     api_key = fleet_config.anthropic_api_key
+    _exec("mkdir -p /home/vscode/.claude")
+    _exec(f"cat > /home/vscode/.claude/.api-key << 'CFLEET_EOF'\n{api_key}\nCFLEET_EOF")
+    _exec("chmod 600 /home/vscode/.claude/.api-key")
     settings = {
         "model": model,
         "alwaysThinkingEnabled": True,
         "skipDangerousModePermissionPrompt": True,
-        "apiKeyHelper": f"echo {api_key}",
+        "apiKeyHelper": "cat /home/vscode/.claude/.api-key",
         "effortLevel": "high",
         "permissions": {
             "allow": ["Read", "Write", "Edit", "MultiEdit", "Bash(*)", "WebFetch"],
@@ -178,146 +198,3 @@ def _provision_container(
     _exec(f"mkdir -p /home/vscode/.claude")
     _exec(f"cat > /home/vscode/.claude/settings.json << 'CFLEET_EOF'\n{settings_json}\nCFLEET_EOF")
 
-    # Pre-accept onboarding
-    onboarding = json.dumps({
-        "hasCompletedOnboarding": True,
-        "hasAcknowledgedDisclaimer": True,
-        "effortCalloutDismissed": True,
-        "projects": {
-            "/workspace": {"hasTrustDialogAccepted": True, "allowedTools": []},
-            "/home/vscode": {"hasTrustDialogAccepted": True, "allowedTools": []},
-        },
-    })
-    _exec(f"cat > /home/vscode/.claude.json << 'CFLEET_EOF'\n{onboarding}\nCFLEET_EOF")
-
-    trust = json.dumps({
-        "hasCompletedOnboarding": True,
-        "hasTrustDialogAccepted": True,
-        "hasTrustDialogHooksAccepted": True,
-        "hasCompletedProjectOnboarding": True,
-    })
-    _exec(f"cat > /home/vscode/.claude/claude.json << 'CFLEET_EOF'\n{trust}\nCFLEET_EOF")
-
-    # Start tmux session
-    _exec(
-        "export TERM=xterm-256color && "
-        "tmux new-session -d -s claude -n code -c /workspace && "
-        f"tmux send-keys -t claude:code 'claude --model {model} --dangerously-skip-permissions' Enter && "
-        "sleep 5 && "
-        "tmux send-keys -t claude:code Enter && "
-        "sleep 2 && "
-        "tmux send-keys -t claude:code Enter && "
-        "tmux new-window -t claude -n bash -c /workspace && "
-        "tmux select-window -t claude:code"
-    )
-
-
-def _docker_cp(container_id: str, src: str, dest: str, owner: str | None = None) -> None:
-    """Copy a file or directory from host into the container."""
-    _run(["docker", "cp", src, f"{container_id}:{dest}"])
-    if owner:
-        _run(["docker", "exec", "-u", "root", container_id, "chown", "-R", f"{owner}:{owner}", dest])
-
-
-def kill_container(name: str) -> None:
-    """Stop and remove a fleet container."""
-    cname = f"cfleet-{name}"
-    _run(["docker", "rm", "-f", cname], check=False)
-
-
-def get_container_id(name: str) -> str:
-    """Get the container ID for a named worker."""
-    r = _run(
-        ["docker", "ps", "-q", "--filter", f"label={FLEET_LABEL}={name}"],
-        check=False,
-    )
-    return r.stdout.strip()
-
-
-# ---------------------------------------------------------------------------
-# WorkerDocker — same interface as WorkerSSH for engine interop
-# ---------------------------------------------------------------------------
-
-
-class WorkerDocker:
-    """Docker exec connection to a fleet worker container.
-
-    Mirrors the WorkerSSH interface so the engine can use either transparently.
-    """
-
-    def __init__(self, container_id: str, user: str = "vscode"):
-        self.container_id = container_id
-        self.user = user
-
-    def close(self) -> None:
-        pass  # No persistent connection to close
-
-    def exec(self, cmd: str, timeout: int = 30) -> tuple[str, str, int]:
-        """Run a command, return (stdout, stderr, exit_code)."""
-        r = subprocess.run(
-            ["docker", "exec", "-u", self.user, self.container_id, "bash", "-c", cmd],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        return r.stdout, r.stderr, r.returncode
-
-    def send_prompt(self, text: str) -> None:
-        """Inject text into the tmux claude session."""
-        self.exec("tmux send-keys -t claude:code Escape")
-        time.sleep(0.5)
-        escaped = text.replace("'", "'\\''")
-        self.exec(f"tmux send-keys -t claude:code -l '{escaped}'")
-        self.exec("tmux send-keys -t claude:code Enter")
-
-    def read_logs(self, lines: int = 100) -> str:
-        stdout, _, _ = self.exec(f"tmux capture-pane -t claude:code -p -S -{lines}")
-        return stdout
-
-    def stream_logs(self, interval: float = 2.0) -> Iterator[str]:
-        prev_output = ""
-        while True:
-            try:
-                output = self.read_logs(lines=200)
-                if output != prev_output:
-                    prev_lines = prev_output.splitlines()
-                    curr_lines = output.splitlines()
-                    overlap = 0
-                    if prev_lines:
-                        for i in range(len(curr_lines)):
-                            if curr_lines[i:i + len(prev_lines)] == prev_lines:
-                                overlap = i + len(prev_lines)
-                                break
-                    new_lines = curr_lines[overlap:]
-                    for line in new_lines:
-                        yield line
-                    prev_output = output
-            except Exception:
-                yield "[connection lost, retrying...]"
-            time.sleep(interval)
-
-    def is_claude_idle(self) -> bool:
-        stdout, _, _ = self.exec("tmux capture-pane -t claude:code -p -S -5")
-        lines = [l.strip() for l in stdout.splitlines() if l.strip()]
-        return any(l == "\u276f" or l.startswith("\u276f ") for l in lines)
-
-    def is_alive(self) -> bool:
-        _, _, exit_code = self.exec("tmux has-session -t claude 2>/dev/null")
-        return exit_code == 0
-
-    def attach(self) -> None:
-        """Attach to the container's tmux session. Replaces current process."""
-        os.execvp(
-            "docker",
-            ["docker", "exec", "-it", "-u", self.user, self.container_id,
-             "tmux", "attach", "-t", "claude"],
-        )
-
-    def send_files(self, local_path: str, remote_path: str = "/workspace/inbox/") -> None:
-        local = local_path.rstrip("/")
-        _docker_cp(self.container_id, local, remote_path, owner=self.user)
-
-    def collect(self, remote_path: str, local_path: str) -> None:
-        Path(local_path).mkdir(parents=True, exist_ok=True)
-        remote = remote_path.rstrip("/")
-        _run(["docker", "cp", f"{self.container_id}:{remote}/.", local_path])
