@@ -578,3 +578,83 @@ def create_app() -> FastAPI:
                 worker = state.get_worker(worker_name)
                 if worker.status == "working":
                     worker.status = "idle"
+                    state.save()
+            except KeyError:
+                pass
+
+        return {"ok": True}
+
+    @app.get("/api/events")
+    async def stream_events(request: Request):
+        """SSE stream of all fleet events."""
+        await _verify_token(request)
+        store = _get_event_store()
+
+        async def event_generator() -> AsyncGenerator[dict, None]:
+            queue = store.subscribe()
+            try:
+                while True:
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                        yield {
+                            "event": "fleet_event",
+                            "data": json.dumps(event.model_dump()),
+                        }
+                    except asyncio.TimeoutError:
+                        yield {"event": "keepalive", "data": "{}"}
+            finally:
+                store.unsubscribe(queue)
+
+        return EventSourceResponse(event_generator())
+
+    @app.get("/api/workers/{name}/events")
+    async def stream_worker_events(name: str, request: Request):
+        """SSE stream of events filtered to one worker."""
+        await _verify_token(request)
+        store = _get_event_store()
+
+        async def event_generator() -> AsyncGenerator[dict, None]:
+            queue = store.subscribe()
+            try:
+                while True:
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                        if event.worker_name == name:
+                            yield {
+                                "event": "fleet_event",
+                                "data": json.dumps(event.model_dump()),
+                            }
+                    except asyncio.TimeoutError:
+                        yield {"event": "keepalive", "data": "{}"}
+            finally:
+                store.unsubscribe(queue)
+
+        return EventSourceResponse(event_generator())
+
+    # ------------------------------------------------------------------
+    # Tasks
+    # ------------------------------------------------------------------
+
+    @app.get("/api/tasks")
+    async def list_tasks(request: Request):
+        await _verify_token(request)
+        cutoff = datetime.now(timezone.utc).timestamp() - 3600
+        to_prune = [
+            tid
+            for tid, t in _tasks.items()
+            if t.finished_at
+            and datetime.fromisoformat(t.finished_at).timestamp() < cutoff
+        ]
+        for tid in to_prune:
+            del _tasks[tid]
+        return list(_tasks.values())
+
+    @app.get("/api/tasks/{task_id}")
+    async def get_task(task_id: str, request: Request):
+        await _verify_token(request)
+        task = _tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return task
+
+    return app
