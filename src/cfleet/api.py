@@ -498,3 +498,83 @@ def create_app() -> FastAPI:
         except Exception:
             pass
 
+        # Then stream new messages
+        try:
+            async for msg in relay.stream_messages():
+                formatted = format_message(msg)
+                if formatted.strip():
+                    yield {
+                        "event": "message",
+                        "data": json.dumps({"message": msg, "formatted": formatted}),
+                    }
+
+                # Also send status updates
+                try:
+                    status = await relay.get_status()
+                    yield {
+                        "event": "status",
+                        "data": json.dumps({
+                            "idle": status.get("status") == "idle",
+                            "total_input_tokens": status.get("total_input_tokens", 0),
+                            "total_output_tokens": status.get("total_output_tokens", 0),
+                            "total_cost_usd": status.get("total_cost_usd", 0.0),
+                        }),
+                    }
+                except Exception:
+                    pass
+        except Exception as e:
+            yield {"event": "error", "data": json.dumps({"error": str(e)})}
+
+    async def _tmux_log_generator(name: str) -> AsyncGenerator[dict, None]:
+        """Stream tmux logs for legacy workers (polling-based)."""
+        engine = FleetEngine()
+        worker = engine.state.get_worker(name)
+        conn = engine._get_conn(worker)
+        seen_content = ""
+        try:
+            while True:
+                try:
+                    output, is_idle = await _run_read(
+                        lambda: (conn.read_logs(100), conn.is_claude_idle())
+                    )
+                    if output != seen_content:
+                        seen_content = output
+                        yield {"event": "logs", "data": json.dumps({"content": output})}
+                    yield {
+                        "event": "status",
+                        "data": json.dumps({"idle": is_idle}),
+                    }
+                except Exception as e:
+                    yield {"event": "error", "data": json.dumps({"error": str(e)})}
+                    conn.close()
+                    conn = engine._get_conn(worker)
+                await asyncio.sleep(2.0)
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # HTTP Hooks receiver (Phase 2)
+    # ------------------------------------------------------------------
+
+    @app.post("/api/hooks/{event_type}")
+    async def receive_hook(event_type: str, request: Request):
+        """Receive webhook events from worker Claude Code HTTP hooks."""
+        body = await request.json()
+        worker_name = body.get("worker_name", "unknown")
+        store = _get_event_store()
+        from cfleet.events import FleetEvent
+        event = FleetEvent(
+            worker_name=worker_name,
+            event_type=event_type,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            data=body,
+        )
+        store.push(event)
+
+        # Auto-update worker status based on events
+        if event_type == "stop":
+            try:
+                state = FleetState.load()
+                worker = state.get_worker(worker_name)
+                if worker.status == "working":
+                    worker.status = "idle"
