@@ -398,3 +398,103 @@ def create_app() -> FastAPI:
                 "total_cost_usd": 0.0,
                 "worker_count": len(engine.state.workers),
                 "workers": {},
+            }
+            for name, worker in engine.state.workers.items():
+                w_usage = {"model": worker.model, "total_cost_usd": 0.0}
+                if worker.communication_mode == "relay":
+                    try:
+                        relay = engine._get_relay(worker)
+                        status = relay.get_status_sync()
+                        w_usage["total_input_tokens"] = status.get("total_input_tokens", 0)
+                        w_usage["total_output_tokens"] = status.get("total_output_tokens", 0)
+                        w_usage["total_cost_usd"] = status.get("total_cost_usd", 0.0)
+                    except Exception:
+                        w_usage["error"] = "relay unreachable"
+                else:
+                    w_usage["total_input_tokens"] = worker.total_input_tokens
+                    w_usage["total_output_tokens"] = worker.total_output_tokens
+                    w_usage["total_cost_usd"] = worker.total_cost_usd
+                totals["workers"][name] = w_usage
+                totals["total_input_tokens"] += w_usage.get("total_input_tokens", 0)
+                totals["total_output_tokens"] += w_usage.get("total_output_tokens", 0)
+                totals["total_cost_usd"] += w_usage.get("total_cost_usd", 0.0)
+            return totals
+
+        return await _run_read(_read)
+
+    # ------------------------------------------------------------------
+    # Logs — SSE stream (relay or legacy tmux)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/workers/{name}/logs/snapshot")
+    async def log_snapshot(name: str, request: Request, lines: int = 100):
+        await _verify_token(request)
+
+        def _read():
+            engine = FleetEngine()
+            worker = engine.state.get_worker(name)
+            if engine._uses_relay(worker):
+                result = engine.messages(name, limit=lines)
+                from cfleet.relay_client import format_message
+                formatted = []
+                for msg in result.get("messages", []):
+                    f = format_message(msg)
+                    if f.strip():
+                        formatted.append(f)
+                return "\n".join(formatted)
+            else:
+                conn = engine._get_conn(worker)
+                try:
+                    return conn.read_logs(lines)
+                finally:
+                    conn.close()
+
+        try:
+            output = await _run_read(_read)
+        except (KeyError, ValueError) as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        return {"lines": output}
+
+    @app.get("/api/workers/{name}/logs")
+    async def stream_logs(name: str, request: Request):
+        await _verify_token(request)
+
+        # Validate worker exists
+        try:
+            engine = FleetEngine()
+            worker = engine.state.get_worker(name)
+        except (KeyError, ValueError) as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        uses_relay = engine._uses_relay(worker)
+
+        if uses_relay:
+            return EventSourceResponse(_relay_log_generator(name))
+        else:
+            return EventSourceResponse(_tmux_log_generator(name))
+
+    async def _relay_log_generator(name: str) -> AsyncGenerator[dict, None]:
+        """Stream structured messages from a relay worker."""
+        from cfleet.relay_client import format_message
+        engine = FleetEngine()
+        worker = engine.state.get_worker(name)
+        relay = engine._get_relay(worker)
+
+        # Send existing messages first
+        try:
+            result = relay.get_messages_sync()
+            messages = result.get("messages", [])
+            if messages:
+                formatted = []
+                for msg in messages:
+                    f = format_message(msg)
+                    if f.strip():
+                        formatted.append(f)
+                if formatted:
+                    yield {
+                        "event": "logs",
+                        "data": json.dumps({"content": "\n".join(formatted)}),
+                    }
+        except Exception:
+            pass
+
