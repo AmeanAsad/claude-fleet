@@ -488,3 +488,47 @@ class FleetEngine:
                 relay = conn.get_relay_client()
                 alive = relay.health_check()
                 info["relay_alive"] = alive
+                info["tmux_alive"] = False
+                if alive:
+                    relay_status = relay.get_status_sync()
+                    info["idle"] = relay_status.get("status") == "idle"
+                    info["session_id"] = relay_status.get("session_id")
+                    info["total_input_tokens"] = relay_status.get("total_input_tokens", 0)
+                    info["total_output_tokens"] = relay_status.get("total_output_tokens", 0)
+                    info["total_cost_usd"] = relay_status.get("total_cost_usd", 0.0)
+                    info["message_count"] = relay_status.get("message_count", 0)
+                else:
+                    info["idle"] = False
+            else:
+                info["relay_alive"] = False
+                info["tmux_alive"] = conn.is_alive()
+                info["idle"] = conn.is_claude_idle() if info["tmux_alive"] else False
+
+            conn.close()
+        except Exception:
+            info["relay_alive"] = False
+            info["tmux_alive"] = False
+            info["uptime"] = "unknown"
+            info["idle"] = False
+
+        return info
+
+    # ------------------------------------------------------------------
+    # messages (relay-only)
+    # ------------------------------------------------------------------
+
+    def messages(self, name: str, offset: int = 0, limit: int = 200) -> dict:
+        """Get structured conversation history from a relay worker."""
+        worker = self.state.get_worker(name)
+        if not self._uses_relay(worker):
+            return {"messages": [], "total": 0, "offset": 0}
+        relay = self._get_relay(worker)
+        return relay.get_messages_sync(offset=offset, limit=limit)
+
+    # ------------------------------------------------------------------
+    # ls (data only — formatting is in CLI)
+    # ------------------------------------------------------------------
+
+    def list_workers(self) -> list[WorkerState]:
+        """Return all workers."""
+        return list(self.state.workers.values())
