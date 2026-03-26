@@ -118,3 +118,83 @@ async def _verify_token(
 # ---------------------------------------------------------------------------
 
 
+async def _run_write(func):
+    """Run a state-mutating FleetEngine call, serialized."""
+    async with _write_lock:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(_write_executor, func)
+
+
+async def _run_read(func):
+    """Run a read-only call in the concurrent read pool."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_read_executor, func)
+
+
+def _prune_tasks() -> None:
+    """Remove oldest finished tasks if over the cap."""
+    finished = [
+        (tid, t) for tid, t in _tasks.items() if t.finished_at
+    ]
+    if len(finished) <= _MAX_FINISHED_TASKS:
+        return
+    finished.sort(key=lambda x: x[1].finished_at or "")
+    for tid, _ in finished[: len(finished) - _MAX_FINISHED_TASKS]:
+        del _tasks[tid]
+
+
+async def _run_background_task(task_id: str, func, cleanup_worker: str | None = None):
+    """Run a long engine operation and update the task registry on completion.
+
+    If cleanup_worker is set and the task fails, remove the worker from state
+    so it doesn't linger as a zombie.
+    """
+    try:
+        await _run_write(func)
+        _tasks[task_id].status = "completed"
+    except Exception as e:
+        _tasks[task_id].status = "failed"
+        _tasks[task_id].error = str(e)
+        if cleanup_worker:
+            try:
+                state = FleetState.load()
+                if cleanup_worker in state.workers:
+                    del state.workers[cleanup_worker]
+                    state.save()
+            except Exception:
+                pass
+    finally:
+        _tasks[task_id].finished_at = datetime.now(timezone.utc).isoformat()
+        _prune_tasks()
+
+
+def _make_engine_and_worker(worker_name: str):
+    """Create a FleetEngine and get the worker + connection."""
+    engine = FleetEngine()
+    worker = engine.state.get_worker(worker_name)
+    return engine, worker
+
+
+# ---------------------------------------------------------------------------
+# App factory
+# ---------------------------------------------------------------------------
+
+
+def create_app() -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        _write_executor.shutdown(wait=False)
+        _read_executor.shutdown(wait=False)
+
+    app = FastAPI(title="Claude Fleet", version="0.2.0", lifespan=lifespan)
+
+    # ------------------------------------------------------------------
+    # Dashboard + Static
+    # ------------------------------------------------------------------
+
+    @app.get("/")
+    async def dashboard():
+        return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/manifest.json")
