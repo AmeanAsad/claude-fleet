@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
+import signal
+import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 
 from pulumi import automation as auto
+
+PULUMI_TIMEOUT = 300  # seconds — fail rather than hang forever
 
 from cfleet.config import CLOUD_PROVIDERS, FleetConfig, FleetState
 from cfleet.infra_pulumi.__main__ import pulumi_program
@@ -50,6 +55,7 @@ class AzureProvider(CloudProvider):
     def get_worker_stack_config(self, fleet_config: FleetConfig) -> tuple[str, dict]:
         azure = fleet_config.cloud.azure
         cfg = {
+            "subscription_id": azure.subscription_id,
             "resource_group": azure.resource_group,
             "region": fleet_config.resolve_region(provider="azure"),
             "instance_type": fleet_config.resolve_instance_type(provider="azure"),
@@ -122,6 +128,10 @@ class InfraManager:
         # Default to empty passphrase for local-backend secret encryption
         # so developers don't need to configure it manually.
         env_vars.setdefault("PULUMI_CONFIG_PASSPHRASE", "")
+        # Auto-detect GCP service account key
+        gcp_key = Path("~/.cfleet/gcp-sa-key.json").expanduser()
+        if gcp_key.exists():
+            env_vars.setdefault("GOOGLE_APPLICATION_CREDENTIALS", str(gcp_key))
 
         ws_opts = auto.LocalWorkspaceOptions(
             project_settings=auto.ProjectSettings(
@@ -198,6 +208,31 @@ class InfraManager:
                 config_key, auto.ConfigValue(value=json.dumps(provider_cfg))
             )
 
+    def _run_with_timeout(self, func, timeout: int = PULUMI_TIMEOUT):
+        """Run a Pulumi operation with a timeout. Raises TimeoutError on expiry."""
+        self._cancel_lock()  # clear stale locks before starting
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(func)
+            try:
+                return future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                # Cancel the Pulumi lock file so it doesn't block future runs
+                self._cancel_lock()
+                raise TimeoutError(
+                    f"Pulumi operation timed out after {timeout}s"
+                )
+
+    def _cancel_lock(self) -> None:
+        """Best-effort removal of Pulumi lock files for the local backend."""
+        backend_url = self.config.pulumi.backend
+        if backend_url.startswith("file://"):
+            lock_dir = Path(backend_url.removeprefix("file://")).expanduser()
+            for lock in lock_dir.rglob(".pulumi/locks/*"):
+                try:
+                    lock.unlink()
+                except OSError:
+                    pass
+
     def add_worker(self, name: str, worker_cfg: dict, provider: str | None = None) -> dict:
         """Add a worker to the Pulumi config and run up. Returns outputs."""
         stack = self._get_stack()
@@ -206,11 +241,12 @@ class InfraManager:
 
         self._apply_config(stack, workers)
 
-        # Sync Pulumi state with actual cloud resources before deploying
-        stack.refresh(on_output=lambda msg: None)
+        def _up():
+            stack.refresh(on_output=lambda msg: None)
+            result = stack.up(on_output=lambda msg: None)
+            return {k: v.value for k, v in result.outputs.items()}
 
-        result = stack.up(on_output=lambda msg: None)
-        return {k: v.value for k, v in result.outputs.items()}
+        return self._run_with_timeout(_up)
 
     def remove_worker(self, name: str) -> None:
         """Remove a worker from the Pulumi config and run up to destroy it."""
@@ -219,11 +255,18 @@ class InfraManager:
 
         self._apply_config(stack, workers)
 
-        stack.refresh(on_output=lambda msg: None)
-        stack.up(on_output=lambda msg: None)
+        def _up():
+            stack.refresh(on_output=lambda msg: None)
+            stack.up(on_output=lambda msg: None)
+
+        self._run_with_timeout(_up)
 
     def destroy_all(self) -> None:
         """Destroy all infrastructure."""
         stack = self._get_stack()
         self._apply_config(stack, {})
-        stack.up(on_output=lambda msg: None)
+
+        def _up():
+            stack.up(on_output=lambda msg: None)
+
+        self._run_with_timeout(_up)
