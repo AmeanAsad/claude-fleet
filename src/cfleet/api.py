@@ -198,3 +198,103 @@ def create_app() -> FastAPI:
         return FileResponse(STATIC_DIR / "index.html")
 
     @app.get("/manifest.json")
+    async def manifest():
+        manifest_path = STATIC_DIR / "manifest.json"
+        if manifest_path.exists():
+            return FileResponse(manifest_path)
+        raise HTTPException(status_code=404)
+
+    # ------------------------------------------------------------------
+    # Workers — reads (no lock, concurrent via _read_executor)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/config")
+    async def get_config(request: Request):
+        await _verify_token(request)
+        from cfleet.config import DEFAULT_SKUS, PROVIDER_DEFAULTS
+        config = FleetConfig.load()
+        provider = config.cloud.provider
+        return {
+            "provider": provider,
+            "model": config.model,
+            "region": config.resolve_region(),
+            "ssh_user": config.resolve_ssh_user(),
+            "instance_type": config.resolve_instance_type(),
+            "vm_type": config.cloud.vm_type.value,
+            "providers": {
+                "azure": {
+                    "region": PROVIDER_DEFAULTS["azure"]["region"],
+                    "instance_type": PROVIDER_DEFAULTS["azure"]["instance_type"],
+                    "skus": {k.value: v for k, v in DEFAULT_SKUS.get("azure", {}).items()},
+                },
+                "gcp": {
+                    "region": PROVIDER_DEFAULTS["gcp"]["region"],
+                    "instance_type": PROVIDER_DEFAULTS["gcp"]["instance_type"],
+                    "skus": {k.value: v for k, v in DEFAULT_SKUS.get("gcp", {}).items()},
+                },
+                "devcontainer": {
+                    "region": "local",
+                    "instance_type": "docker",
+                    "skus": {},
+                },
+            },
+        }
+
+    @app.get("/api/workers")
+    async def list_workers(request: Request):
+        await _verify_token(request)
+        state = FleetState.load()
+        return [w.model_dump() for w in state.workers.values()]
+
+    @app.get("/api/workers/{name}")
+    async def get_worker(name: str, request: Request):
+        await _verify_token(request)
+
+        def _status():
+            engine = FleetEngine()
+            return engine.status(name)
+
+        try:
+            return await _run_read(_status)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    # ------------------------------------------------------------------
+    # Workers — writes (serialized via _write_lock)
+    # ------------------------------------------------------------------
+
+    @app.post("/api/workers")
+    async def spawn_worker(req: SpawnRequest, request: Request):
+        await _verify_token(request)
+        task_id = uuid.uuid4().hex[:8]
+        _tasks[task_id] = TaskInfo(
+            id=task_id,
+            operation="spawn",
+            worker_name=req.name,
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        resolved_vm_type = VMType(req.vm_type) if req.vm_type else None
+
+        asyncio.create_task(
+            _run_background_task(
+                task_id,
+                lambda: FleetEngine().spawn(
+                    name=req.name,
+                    repos=req.repos,
+                    model=req.model,
+                    vm_type=resolved_vm_type,
+                    instance_type=req.instance_type,
+                    region=req.region,
+                    provider=req.provider,
+                ),
+                cleanup_worker=req.name,
+            )
+        )
+        return {"task_id": task_id}
+
+    @app.delete("/api/workers/{name}")
+    async def kill_worker(name: str, request: Request):
+        await _verify_token(request)
+        task_id = uuid.uuid4().hex[:8]
+        _tasks[task_id] = TaskInfo(
