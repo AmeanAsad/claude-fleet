@@ -298,3 +298,103 @@ def create_app() -> FastAPI:
         await _verify_token(request)
         task_id = uuid.uuid4().hex[:8]
         _tasks[task_id] = TaskInfo(
+            id=task_id,
+            operation="kill",
+            worker_name=name,
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        asyncio.create_task(
+            _run_background_task(
+                task_id,
+                lambda name=name: FleetEngine().kill(name),
+            )
+        )
+        return {"task_id": task_id}
+
+    @app.post("/api/workers/{name}/ask")
+    async def ask_worker(name: str, req: AskRequest, request: Request):
+        await _verify_token(request)
+        try:
+            await _run_write(
+                lambda: FleetEngine().ask(name, req.prompt)
+            )
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        return {"ok": True}
+
+    @app.post("/api/workers/{name}/interrupt")
+    async def interrupt_worker(name: str, request: Request):
+        await _verify_token(request)
+        try:
+            await _run_write(
+                lambda: FleetEngine().interrupt(name)
+            )
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        return {"ok": True}
+
+    # ------------------------------------------------------------------
+    # Messages — structured conversation history (relay workers)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/workers/{name}/messages")
+    async def get_messages(name: str, request: Request, offset: int = 0, limit: int = 200):
+        await _verify_token(request)
+
+        def _read():
+            return FleetEngine().messages(name, offset=offset, limit=limit)
+
+        try:
+            return await _run_read(_read)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception:
+            return {"messages": [], "error": "Worker relay unreachable"}
+
+    # ------------------------------------------------------------------
+    # Usage / cost tracking
+    # ------------------------------------------------------------------
+
+    @app.get("/api/workers/{name}/usage")
+    async def get_worker_usage(name: str, request: Request):
+        await _verify_token(request)
+
+        def _read():
+            engine = FleetEngine()
+            worker = engine.state.get_worker(name)
+            info = {"name": name, "model": worker.model}
+            if worker.communication_mode == "relay":
+                try:
+                    relay = engine._get_relay(worker)
+                    status = relay.get_status_sync()
+                    info["total_input_tokens"] = status.get("total_input_tokens", 0)
+                    info["total_output_tokens"] = status.get("total_output_tokens", 0)
+                    info["total_cache_read_tokens"] = status.get("total_cache_read_tokens", 0)
+                    info["total_cache_creation_tokens"] = status.get("total_cache_creation_tokens", 0)
+                    info["total_cost_usd"] = status.get("total_cost_usd", 0.0)
+                except Exception:
+                    info["error"] = "relay unreachable"
+            else:
+                info["total_input_tokens"] = worker.total_input_tokens
+                info["total_output_tokens"] = worker.total_output_tokens
+                info["total_cost_usd"] = worker.total_cost_usd
+            return info
+
+        try:
+            return await _run_read(_read)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    @app.get("/api/fleet/usage")
+    async def get_fleet_usage(request: Request):
+        await _verify_token(request)
+
+        def _read():
+            engine = FleetEngine()
+            totals = {
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_cost_usd": 0.0,
+                "worker_count": len(engine.state.workers),
+                "workers": {},
