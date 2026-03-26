@@ -428,3 +428,63 @@ class FleetEngine:
         """Print worker logs — structured messages from relay, or raw tmux output."""
         worker = self.state.get_worker(name)
 
+        if self._uses_relay(worker):
+            relay = self._get_relay(worker)
+            if follow:
+                try:
+                    import asyncio
+                    asyncio.run(self._stream_relay_logs(relay))
+                except KeyboardInterrupt:
+                    pass
+            else:
+                result = relay.get_messages_sync(limit=lines)
+                for msg in result.get("messages", []):
+                    formatted = format_message(msg)
+                    if formatted.strip():
+                        console.print(formatted, markup=True)
+        else:
+            conn = self._get_conn(worker)
+            if follow:
+                try:
+                    for line in conn.stream_logs():
+                        console.print(line)
+                except KeyboardInterrupt:
+                    pass
+            else:
+                output = conn.read_logs(lines=lines)
+                console.print(output)
+            conn.close()
+
+    async def _stream_relay_logs(self, relay: RelayClient) -> None:
+        """Stream structured messages from a relay."""
+        async for msg in relay.stream_messages():
+            formatted = format_message(msg)
+            if formatted.strip():
+                console.print(formatted, markup=True)
+
+    # ------------------------------------------------------------------
+    # status
+    # ------------------------------------------------------------------
+
+    def status(self, name: str) -> dict:
+        """Get detailed status for a worker."""
+        worker = self.state.get_worker(name)
+        info = worker.model_dump()
+
+        reachable = (worker.ip or worker.container_id) and worker.status not in ("stopped", "spawning")
+        if not reachable:
+            info["relay_alive"] = False
+            info["tmux_alive"] = False
+            info["uptime"] = "N/A"
+            info["idle"] = False
+            return info
+
+        try:
+            conn = self._get_conn(worker)
+            stdout, _, _ = conn.exec("uptime -p")
+            info["uptime"] = stdout.strip()
+
+            if self._uses_relay(worker):
+                relay = conn.get_relay_client()
+                alive = relay.health_check()
+                info["relay_alive"] = alive
