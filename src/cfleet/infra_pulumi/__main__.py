@@ -24,6 +24,7 @@ def _create_azure_resources(workers: dict, azure_cfg: dict) -> None:
 
     region = azure_cfg["region"]
     rg_name = azure_cfg["resource_group"]
+    subscription_id = azure_cfg.get("subscription_id", "")
     ssh_user = azure_cfg["ssh_user"]
     ssh_key_path = azure_cfg["ssh_key"]
     default_instance_type = azure_cfg["instance_type"]
@@ -31,10 +32,17 @@ def _create_azure_resources(workers: dict, azure_cfg: dict) -> None:
 
     ssh_pub_key = _read_ssh_pub_key(ssh_key_path)
 
+    # Import the existing RG if subscription_id is available; otherwise create fresh.
+    rg_opts = None
+    if subscription_id:
+        rg_id = f"/subscriptions/{subscription_id}/resourceGroups/{rg_name}"
+        rg_opts = pulumi.ResourceOptions(import_=rg_id, retain_on_delete=True)
+
     resource_group = azure.resources.ResourceGroup(
         "fleet-rg",
         resource_group_name=rg_name,
         location=region,
+        opts=rg_opts,
     )
 
     # Per-region networking (vnet, subnet, NSG)
@@ -77,6 +85,17 @@ def _create_azure_resources(workers: dict, azure_cfg: dict) -> None:
                     protocol="Tcp",
                     source_port_range="*",
                     destination_port_range="22",
+                    source_address_prefix="*",
+                    destination_address_prefix="*",
+                ),
+                azure.network.SecurityRuleArgs(
+                    name="CfleetServices",
+                    priority=1100,
+                    direction="Inbound",
+                    access="Allow",
+                    protocol="Tcp",
+                    source_port_range="*",
+                    destination_port_range="8000-9000",
                     source_address_prefix="*",
                     destination_address_prefix="*",
                 ),
@@ -233,6 +252,18 @@ def _create_gcp_resources(workers: dict, gcp_cfg: dict) -> None:
         allows=[gcp.compute.FirewallAllowArgs(
             protocol="tcp",
             ports=["22"],
+        )],
+        source_ranges=["0.0.0.0/0"],
+        target_tags=["fleet-worker"],
+    )
+
+    gcp.compute.Firewall(
+        "fleet-allow-cfleet",
+        project=project_id,
+        network=network.id,
+        allows=[gcp.compute.FirewallAllowArgs(
+            protocol="tcp",
+            ports=["8000-9000"],
         )],
         source_ranges=["0.0.0.0/0"],
         target_tags=["fleet-worker"],
