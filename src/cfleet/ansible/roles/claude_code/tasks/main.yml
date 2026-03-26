@@ -40,6 +40,13 @@
     owner: "{{ ssh_user }}"
     mode: "0700"
 
+- name: Store API key in file for safe shell access
+  ansible.builtin.copy:
+    content: "{{ anthropic_api_key }}"
+    dest: "/home/{{ ssh_user }}/.claude/.api-key"
+    owner: "{{ ssh_user }}"
+    mode: "0600"
+
 - name: Deploy Claude Code settings
   ansible.builtin.template:
     src: claude-settings.json.j2
