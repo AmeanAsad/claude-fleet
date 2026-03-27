@@ -48,3 +48,63 @@ button{font:inherit;cursor:pointer}
 input,select{font:inherit}
 ::-webkit-scrollbar{width:6px}
 ::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--border-light)}
+
+/* ── Header ────────────────────────────────────────────── */
+.header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;min-height:48px}
+.header-logo{display:flex;align-items:center;gap:8px;font-weight:700;font-size:15px;color:var(--accent-bright);letter-spacing:-0.3px;white-space:nowrap}
+.header-logo svg{flex-shrink:0}
+.header-spacer{flex:1}
+.fleet-cost{font-size:12px;color:var(--text-dim);font-family:var(--font-mono);white-space:nowrap}
+.fleet-cost b{color:var(--accent);font-weight:600}
+.token-input{background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:6px;font-size:12px;width:140px}
+.token-input:focus{outline:none;border-color:var(--accent-dim)}
+.back-btn{display:none;background:none;border:none;color:var(--accent);font-size:14px;padding:4px 8px}
+
+/* ── Layout ────────────────────────────────────────────── */
+.layout{flex:1;display:grid;grid-template-columns:280px 1fr;overflow:hidden}
+
+/* ── Sidebar ───────────────────────────────────────────── */
+.sidebar{display:flex;flex-direction:column;border-right:1px solid var(--border);background:var(--surface);overflow:hidden}
+.sidebar-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px 8px}
+.sidebar-head span{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--text-dim)}
+.spawn-btn{background:var(--accent-glow);border:1px solid var(--accent-dim);color:var(--accent);font-size:12px;padding:3px 10px;border-radius:6px;font-weight:500;transition:all .15s}
+.spawn-btn:hover{background:var(--accent-glow-strong);border-color:var(--accent)}
+.worker-list{flex:1;overflow-y:auto;padding:4px 8px}
+.worker-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;cursor:pointer;font-size:13px;transition:background .12s;border:1px solid transparent}
+.worker-item:hover{background:var(--surface-2)}
+.worker-item.active{background:var(--accent-glow);border-color:var(--border-light)}
+.worker-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;transition:background .4s}
+.dot-idle{background:var(--green)}
+.dot-working{background:var(--yellow);animation:pulse 1.5s ease-in-out infinite}
+.dot-spawning,.dot-provisioning{background:var(--cyan);animation:pulse 1s ease-in-out infinite}
+.dot-errored{background:var(--red)}
+.dot-stopped{background:var(--text-dim)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.worker-info-col{flex:1;min-width:0}
+.worker-name{font-weight:500;color:var(--text-bright);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.worker-meta{font-size:11px;color:var(--text-dim);margin-top:1px}
+.worker-cost{font-size:11px;color:var(--accent-dim);font-family:var(--font-mono);flex-shrink:0}
+.sidebar-footer{padding:10px 14px;border-top:1px solid var(--border);font-size:11px;color:var(--text-dim)}
+.sidebar-footer b{color:var(--accent)}
+
+/* tasks */
+.task-section{border-top:1px solid var(--border);max-height:140px;overflow-y:auto}
+.task-section .sidebar-head{padding-top:8px;padding-bottom:4px}
+.task-item{font-size:11px;padding:3px 14px;color:var(--text-dim);display:flex;align-items:center;gap:6px}
+.task-item .status{font-weight:500}
+.task-item .status-running{color:var(--yellow)}
+.task-item .status-completed{color:var(--green)}
+.task-item .status-failed{color:var(--red)}
+
+/* ── Detail Panel ──────────────────────────────────────── */
+.detail{display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
+.detail-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--text-dim);font-size:14px;padding:20px}
+.detail-empty svg{opacity:.3}
+
+/* Worker bar */
+.worker-bar{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0;flex-wrap:wrap}
+.worker-bar-name{font-weight:600;font-size:14px;color:var(--text-bright)}
+.worker-bar-status{font-size:11px;padding:2px 8px;border-radius:10px;font-weight:500}
+.status-idle{background:rgba(134,232,154,.12);color:var(--green)}
