@@ -378,3 +378,103 @@ function renderWorkerList() {
       <div class="worker-cost">${(workerCosts[w.name] || w.total_cost_usd) > 0 ? '$' + (workerCosts[w.name] || w.total_cost_usd).toFixed(2) : ''}</div>`;
     list.appendChild(item);
   });
+  updateFleetCost();
+}
+
+function updateFleetCost() {
+  // Only show worker count here; cost is updated solely by refreshFleetCost()
+  // to avoid flickering between two data sources
+  const count = workers.length;
+  if (count > 0) {
+    if (!$('#fleetCost').innerHTML) $('#fleetCost').innerHTML = `<b>${count}</b> worker${count !== 1 ? 's' : ''}`;
+    if (!$('#sidebarFooter').innerHTML) $('#sidebarFooter').innerHTML = `<b>${count}</b> worker${count !== 1 ? 's' : ''}`;
+  } else {
+    $('#fleetCost').textContent = 'No workers';
+    $('#sidebarFooter').textContent = 'No workers running';
+  }
+}
+
+// ── Tasks ─────────────────────────────────────────────────
+async function refreshTasks() {
+  try {
+    const tasks = await api('/tasks');
+    const sec = $('#taskSection');
+    const list = $('#taskList');
+    if (!tasks.length) { sec.style.display = 'none'; return; }
+    sec.style.display = '';
+    list.innerHTML = '';
+    tasks.forEach(t => {
+      const statusCls = 'status-' + t.status;
+      list.innerHTML += `<div class="task-item"><span class="status ${statusCls}">${esc(t.status)}</span> ${esc(t.operation)} <b>${esc(t.worker_name)}</b>${t.error ? ' <span style="color:var(--red)">' + esc(t.error) + '</span>' : ''}</div>`;
+    });
+    return tasks.some(t => t.status === 'running');
+  } catch(e) { return false; }
+}
+
+// ── Select Worker ─────────────────────────────────────────
+async function selectWorker(name) {
+  selected = name;
+  renderedMsgCount = 0;
+  renderWorkerList();
+  $('#layout').classList.add('detail-open');
+
+  const detail = $('#detail');
+  detail.innerHTML = '';
+
+  // Worker bar
+  const w = workers.find(x => x.name === name) || { name, status: '...' };
+  const bar = el('div', 'worker-bar', `
+    <div class="worker-bar-name">${esc(name)}</div>
+    <div class="worker-bar-status status-${w.status}" id="wStatus">${esc(w.status)}</div>
+    <div class="worker-bar-spacer"></div>
+    <div class="worker-bar-stat" id="wTokens"></div>
+    <div class="worker-bar-stat" id="wCost"></div>
+    <button class="bar-btn" id="infoToggle">Info</button>
+    <button class="bar-btn bar-btn-warn" id="interruptBtn">Interrupt</button>
+    <button class="bar-btn bar-btn-danger" id="killBtn">Kill</button>`);
+  detail.appendChild(bar);
+
+  // Info row (hidden by default)
+  const info = el('div', 'info-row', '');
+  info.id = 'infoRow';
+  detail.appendChild(info);
+
+  // Messages
+  const msgs = el('div', 'messages', '');
+  msgs.id = 'messages';
+  detail.appendChild(msgs);
+
+  // Prompt bar
+  const pb = el('div', 'prompt-bar', `
+    <textarea class="prompt-input" id="promptInput" placeholder="Send a prompt..." rows="1"></textarea>
+    <button class="send-btn" id="sendBtn">Send</button>`);
+  detail.appendChild(pb);
+
+  // Wire events
+  $('#infoToggle').onclick = () => $('#infoRow').classList.toggle('open');
+  $('#interruptBtn').onclick = interruptWorker;
+  $('#killBtn').onclick = killWorker;
+  $('#sendBtn').onclick = sendPrompt;
+  $('#promptInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendPrompt(); }
+  });
+  // Auto-resize textarea
+  $('#promptInput').addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+  });
+
+  // Load data
+  fetchWorkerDetail(name);
+  fetchMessages(name);
+  connectSSE(name);
+  startMsgPoll(name);
+}
+
+async function fetchWorkerDetail(name) {
+  try {
+    const info = await api('/workers/' + encodeURIComponent(name));
+    if (selected !== name) return;
+    // Update status badge + sidebar dot
+    const st = info.idle ? 'idle' : (info.status === 'working' ? 'working' : info.status);
+    if (['idle','working'].includes(st)) liveStatus[name] = st;
