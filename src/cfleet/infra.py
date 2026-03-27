@@ -12,7 +12,7 @@ from pathlib import Path
 
 from pulumi import automation as auto
 
-PULUMI_TIMEOUT = 300  # seconds — fail rather than hang forever
+PULUMI_TIMEOUT = 300  # 5 minutes  # seconds — fail rather than hang forever
 
 from cfleet.config import CLOUD_PROVIDERS, FleetConfig, FleetState
 from cfleet.infra_pulumi.__main__ import pulumi_program
