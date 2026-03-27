@@ -168,3 +168,63 @@ input,select{font:inherit}
 .prompt-input{flex:1;background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:8px;font-size:14px;resize:none;min-height:42px;max-height:120px;line-height:1.4}
 .prompt-input:focus{outline:none;border-color:var(--accent-dim);box-shadow:0 0 0 2px var(--accent-glow)}
 .prompt-input::placeholder{color:var(--text-dim)}
+.send-btn{background:var(--accent-glow-strong);border:1px solid var(--accent-dim);color:var(--accent);padding:0 16px;border-radius:8px;font-weight:600;font-size:13px;transition:all .15s;white-space:nowrap}
+.send-btn:hover{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+
+/* ── Modal ─────────────────────────────────────────────── */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);z-index:100;align-items:center;justify-content:center;padding:20px}
+.modal-overlay.open{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;width:100%;max-width:400px;animation:modalIn .2s ease}
+@keyframes modalIn{from{opacity:0;transform:scale(.95)}to{opacity:1;transform:none}}
+.modal h2{font-size:15px;font-weight:600;color:var(--text-bright);margin-bottom:16px}
+.modal .field{margin-bottom:12px}
+.modal label{display:block;font-size:11px;color:var(--text-dim);margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px}
+.modal .field-hint{font-size:10px;color:var(--text-dim);margin-top:2px;font-style:italic}
+.modal input,.modal select{width:100%;background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:6px;font-size:13px}
+.modal input:focus,.modal select:focus{outline:none;border-color:var(--accent-dim)}
+.modal select option{background:var(--surface-2);color:var(--text)}
+.modal .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:18px}
+.modal .cancel-btn{background:none;border:1px solid var(--border);color:var(--text-dim);padding:6px 14px;border-radius:6px;font-size:13px}
+.modal .cancel-btn:hover{border-color:var(--text);color:var(--text)}
+.modal .confirm-btn{background:var(--accent-glow-strong);border:1px solid var(--accent-dim);color:var(--accent);padding:6px 14px;border-radius:6px;font-size:13px;font-weight:600}
+.modal .confirm-btn:hover{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+
+/* ── Toast ─────────────────────────────────────────────── */
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:8px 16px;border-radius:8px;font-size:13px;z-index:200;opacity:0;transition:opacity .3s;pointer-events:none}
+.toast.visible{opacity:1}
+.toast.error{border-color:rgba(223,102,102,.3);color:var(--red)}
+
+/* ── Mobile ────────────────────────────────────────────── */
+@media(max-width:768px){
+  .layout{grid-template-columns:1fr}
+  .sidebar{position:absolute;inset:0;top:48px;z-index:10;transition:transform .25s ease}
+  .layout.detail-open .sidebar{transform:translateX(-100%)}
+  .detail{position:absolute;inset:0;top:48px;z-index:9;transform:translateX(100%);transition:transform .25s ease}
+  .layout.detail-open .detail{transform:translateX(0)}
+  .back-btn{display:block}
+  .token-input{width:100px}
+  .worker-bar{padding:8px 12px}
+  .messages{padding:12px}
+  .prompt-bar{padding:8px 12px}
+  .prompt-input{padding:8px 12px;font-size:16px /* prevent iOS zoom */}
+}
+@media(max-width:360px){
+  .header-logo span{display:none}
+  .fleet-cost{font-size:11px}
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <button class="back-btn" id="backBtn" aria-label="Back">&larr;</button>
+  <div class="header-logo">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+    <span>Claude Fleet</span>
+  </div>
+  <div class="header-spacer"></div>
+  <div class="fleet-cost" id="fleetCost"></div>
+  <input class="token-input" id="tokenInput" type="password" placeholder="API token" autocomplete="off">
+</div>
+
+<div class="layout" id="layout">
