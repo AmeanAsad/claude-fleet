@@ -4,7 +4,7 @@
   "description": "Control your Claude Code fleet from any device",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#1f1e1b",
+  "background_color": "#2b2a27",
   "theme_color": "#2b2a27",
   "icons": []
 }
