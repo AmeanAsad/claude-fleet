@@ -658,3 +658,103 @@ function scrollToBottom() {
   if (c) requestAnimationFrame(() => c.scrollTop = c.scrollHeight);
 }
 
+// ── SSE Connection ────────────────────────────────────────
+function connectSSE(name) {
+  if (logSource) { logSource.close(); logSource = null; }
+  const token = getToken();
+  const url = '/api/workers/' + encodeURIComponent(name) + '/logs' + (token ? '?token=' + encodeURIComponent(token) : '');
+  logSource = new EventSource(url);
+
+  logSource.addEventListener('message', e => {
+    if (selected !== name) return;
+    try {
+      const data = JSON.parse(e.data);
+      if (data.message) appendMessage(data.message);
+      scrollToBottom();
+    } catch(ex) {}
+  });
+
+  logSource.addEventListener('status', e => {
+    if (selected !== name) return;
+    try {
+      const data = JSON.parse(e.data);
+      const st = data.idle ? 'idle' : 'working';
+      const badge = $('#wStatus');
+      if (badge) {
+        badge.textContent = st;
+        badge.className = 'worker-bar-status status-' + st;
+      }
+      // Sync sidebar dot + persist
+      liveStatus[name] = st;
+      const w = workers.find(x => x.name === name);
+      if (w && w.status !== st) { w.status = st; renderWorkerList(); }
+      const tk = $('#wTokens');
+      const ck = $('#wCost');
+      if (tk && (data.total_input_tokens || data.total_output_tokens)) {
+        tk.innerHTML = `<b>${fmtNum(data.total_input_tokens||0)}</b> in / <b>${fmtNum(data.total_output_tokens||0)}</b> out`;
+      }
+      if (ck && data.total_cost_usd > 0) {
+        ck.innerHTML = `<b>$${data.total_cost_usd.toFixed(4)}</b>`;
+      }
+    } catch(ex) {}
+  });
+
+  logSource.onerror = () => {
+    // EventSource auto-reconnects; no action needed
+  };
+}
+
+// Periodic message sync to catch anything SSE missed
+function startMsgPoll(name) {
+  if (msgPollTimer) clearInterval(msgPollTimer);
+  msgPollTimer = setInterval(async () => {
+    if (selected !== name) { clearInterval(msgPollTimer); return; }
+    try {
+      const data = await api('/workers/' + encodeURIComponent(name) + '/messages?limit=500');
+      const msgs = data.messages || [];
+      if (msgs.length > renderedMsgCount) {
+        // New messages arrived that SSE may have missed; re-render
+        const container = $('#messages');
+        if (!container) return;
+        container.innerHTML = '';
+        renderedMsgCount = 0;
+        msgs.forEach(m => appendMessage(m));
+        scrollToBottom();
+      }
+    } catch(e) {}
+  }, 8000);
+}
+
+// ── Actions ───────────────────────────────────────────────
+async function sendPrompt() {
+  const input = $('#promptInput');
+  if (!input || !selected) return;
+  const prompt = input.value.trim();
+  if (!prompt) return;
+  input.value = '';
+  input.style.height = 'auto';
+  try {
+    await api('/workers/' + encodeURIComponent(selected) + '/ask', {
+      method: 'POST', body: { prompt }
+    });
+  } catch(e) {
+    toast('Failed: ' + e.message, true);
+  }
+}
+
+async function interruptWorker() {
+  if (!selected) return;
+  try {
+    await api('/workers/' + encodeURIComponent(selected) + '/interrupt', { method: 'POST' });
+    toast('Interrupted ' + selected);
+  } catch(e) { toast('Failed: ' + e.message, true); }
+}
+
+async function killWorker() {
+  if (!selected || !confirm('Destroy worker "' + selected + '"?')) return;
+  try {
+    await api('/workers/' + encodeURIComponent(selected), { method: 'DELETE' });
+    toast('Destroying ' + selected);
+    goBack();
+    refreshWorkers();
+    refreshTasks();
