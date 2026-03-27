@@ -308,3 +308,73 @@ function el(tag, cls, html) {
 }
 
 function toast(msg, isError) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = 'toast visible' + (isError ? ' error' : '');
+  clearTimeout(t._tid);
+  t._tid = setTimeout(() => t.className = 'toast', 3000);
+}
+
+// ── Token ─────────────────────────────────────────────────
+function getToken() { return localStorage.getItem('cfleet_token') || $('#tokenInput').value || ''; }
+$('#tokenInput').addEventListener('change', e => localStorage.setItem('cfleet_token', e.target.value));
+{ const s = localStorage.getItem('cfleet_token'); if (s) $('#tokenInput').value = s; }
+
+// ── API ───────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const token = getToken();
+  const headers = opts.headers || {};
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  if (opts.body && typeof opts.body === 'object') {
+    headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(opts.body);
+  }
+  const res = await fetch('/api' + path, { ...opts, headers });
+  if (res.status === 401) { $('#tokenInput').focus(); throw new Error('Auth required'); }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || 'Request failed');
+  }
+  return res.json();
+}
+
+// ── State ─────────────────────────────────────────────────
+let workers = [];
+let workerCosts = {};  // name -> cost from fleet usage
+let selected = null;  // worker name
+let logSource = null;
+let msgPollTimer = null;
+let renderedMsgCount = 0;
+let fleetConfig = null; // cached from /api/config
+let liveStatus = {}; // name -> 'idle'|'working' from relay, survives list refreshes
+
+// ── Worker List ───────────────────────────────────────────
+async function refreshWorkers() {
+  try {
+    workers = await api('/workers');
+    // Apply live relay statuses over stale state-file statuses
+    workers.forEach(w => {
+      if (liveStatus[w.name] && (w.status === 'working' || w.status === 'idle')) {
+        w.status = liveStatus[w.name];
+      }
+    });
+    renderWorkerList();
+  } catch(e) { /* retry next cycle */ }
+}
+
+function renderWorkerList() {
+  const list = $('#workerList');
+  list.innerHTML = '';
+  workers.forEach(w => {
+    const item = el('div', 'worker-item' + (selected === w.name ? ' active' : ''));
+    item.onclick = () => selectWorker(w.name);
+    const dotCls = ({idle:'dot-idle',working:'dot-working',spawning:'dot-spawning',provisioning:'dot-provisioning',errored:'dot-errored',stopped:'dot-stopped'})[w.status] || '';
+    item.innerHTML = `
+      <div class="worker-dot ${dotCls}"></div>
+      <div class="worker-info-col">
+        <div class="worker-name">${esc(w.name)}</div>
+        <div class="worker-meta">${esc(w.status)} &middot; ${esc(w.provider)}${w.model ? ' &middot; ' + esc(w.model) : ''}</div>
+      </div>
+      <div class="worker-cost">${(workerCosts[w.name] || w.total_cost_usd) > 0 ? '$' + (workerCosts[w.name] || w.total_cost_usd).toFixed(2) : ''}</div>`;
+    list.appendChild(item);
+  });
