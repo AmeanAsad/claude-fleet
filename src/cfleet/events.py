@@ -59,5 +59,3 @@ class EventStore:
     def unsubscribe(self, q: asyncio.Queue) -> None:
         """Remove a subscriber queue."""
         self._subscribers = [s for s in self._subscribers if s is not q]
-
-# TODO: add persistence layer for events across restarts
