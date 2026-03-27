@@ -758,3 +758,93 @@ async function killWorker() {
     goBack();
     refreshWorkers();
     refreshTasks();
+  } catch(e) { toast('Failed: ' + e.message, true); }
+}
+
+// ── Navigation ────────────────────────────────────────────
+function goBack() {
+  if (logSource) { logSource.close(); logSource = null; }
+  if (msgPollTimer) clearInterval(msgPollTimer);
+  selected = null;
+  renderedMsgCount = 0;
+  $('#layout').classList.remove('detail-open');
+  renderWorkerList();
+  const detail = $('#detail');
+  detail.innerHTML = `<div class="detail-empty"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>Select a worker to view conversation</div>`;
+}
+
+$('#backBtn').onclick = goBack;
+
+// ── Spawn Modal ───────────────────────────────────────────
+async function loadConfig() {
+  try {
+    fleetConfig = await api('/config');
+  } catch(e) {
+    fleetConfig = null;
+  }
+}
+
+function updateSpawnDefaults() {
+  const providerSelect = $('#spawnProvider');
+  const provider = providerSelect.value;
+  if (!fleetConfig) return;
+
+  const pCfg = fleetConfig.providers[provider];
+  if (!pCfg) return;
+
+  // Update placeholders with actual defaults for selected provider
+  const model = fleetConfig.model || 'claude-opus-4-6';
+  const instance = pCfg.instance_type || '';
+  const region = pCfg.region || '';
+
+  $('#spawnModel').placeholder = model;
+  $('#spawnInstance').placeholder = instance;
+  $('#spawnRegion').placeholder = region;
+
+  // Update hint
+  const hint = $('#providerHint');
+  if (provider === 'devcontainer') {
+    hint.textContent = 'Local Docker container';
+  } else if (provider === 'azure') {
+    hint.textContent = 'Azure VM (' + (pCfg.region || '') + ')';
+  } else if (provider === 'gcp') {
+    hint.textContent = 'Google Cloud VM (' + (pCfg.region || '') + ')';
+  } else {
+    hint.textContent = '';
+  }
+
+  // Update VM type SKUs hint - clear old values when provider changes
+  const vmType = $('#spawnVmType').value || 'regular';
+  if (pCfg.skus && pCfg.skus[vmType]) {
+    $('#spawnInstance').placeholder = pCfg.skus[vmType];
+  }
+}
+
+function populateProviderSelect() {
+  const providerSelect = $('#spawnProvider');
+  providerSelect.innerHTML = '';
+  if (!fleetConfig) {
+    providerSelect.innerHTML = '<option value="">unavailable</option>';
+    return;
+  }
+
+  const current = fleetConfig.provider || 'devcontainer';
+  const providers = Object.keys(fleetConfig.providers);
+  providers.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = p + (p === current ? ' (default)' : '');
+    if (p === current) opt.selected = true;
+    providerSelect.appendChild(opt);
+  });
+}
+
+$('#spawnBtn').onclick = async () => {
+  $('#spawnModal').classList.add('open');
+  if (!fleetConfig) await loadConfig();
+  populateProviderSelect();
+  updateSpawnDefaults();
+  $('#spawnName').focus();
+};
+
+$('#spawnProvider').addEventListener('change', updateSpawnDefaults);
