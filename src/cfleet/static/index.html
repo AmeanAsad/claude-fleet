@@ -848,3 +848,93 @@ $('#spawnBtn').onclick = async () => {
 };
 
 $('#spawnProvider').addEventListener('change', updateSpawnDefaults);
+$('#spawnVmType').addEventListener('change', () => {
+  if (!fleetConfig) return;
+  const provider = $('#spawnProvider').value;
+  const pCfg = fleetConfig.providers[provider];
+  if (!pCfg) return;
+  const vmType = $('#spawnVmType').value || 'regular';
+  if (pCfg.skus && pCfg.skus[vmType]) {
+    $('#spawnInstance').placeholder = pCfg.skus[vmType];
+  } else {
+    $('#spawnInstance').placeholder = pCfg.instance_type || '';
+  }
+});
+
+$('#spawnCancel').onclick = () => $('#spawnModal').classList.remove('open');
+$('#spawnModal').onclick = e => { if (e.target === $('#spawnModal')) $('#spawnModal').classList.remove('open'); };
+document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#spawnModal').classList.remove('open'); });
+
+$('#spawnConfirm').onclick = async () => {
+  const name = $('#spawnName').value.trim();
+  if (!name) { toast('Name is required', true); return; }
+  const body = { name };
+  const provider = $('#spawnProvider').value;
+  const vmType = $('#spawnVmType').value;
+  const model = $('#spawnModel').value.trim();
+  const instance = $('#spawnInstance').value.trim();
+  const region = $('#spawnRegion').value.trim();
+  if (provider) body.provider = provider;
+  if (vmType) body.vm_type = vmType;
+  if (model) body.model = model;
+  if (instance) body.instance_type = instance;
+  if (region) body.region = region;
+  try {
+    await api('/workers', { method: 'POST', body });
+    $('#spawnModal').classList.remove('open');
+    $('#spawnName').value = '';
+    $('#spawnModel').value = '';
+    $('#spawnInstance').value = '';
+    $('#spawnRegion').value = '';
+    toast('Spawning ' + name);
+    refreshWorkers();
+    refreshTasks();
+  } catch(e) { toast('Failed: ' + e.message, true); }
+};
+
+// ── Fleet Cost (periodic) ─────────────────────────────────
+async function refreshFleetCost() {
+  try {
+    const usage = await api('/fleet/usage');
+    const count = usage.worker_count || 0;
+    const cost = usage.total_cost_usd || 0;
+    // Store per-worker costs
+    if (usage.workers) {
+      for (const [name, wUsage] of Object.entries(usage.workers)) {
+        workerCosts[name] = wUsage.total_cost_usd || 0;
+      }
+      renderWorkerList();
+    }
+    if (count > 0) {
+      $('#fleetCost').innerHTML = `<b>${count}</b> worker${count!==1?'s':''} &middot; <b>$${cost.toFixed(2)}</b>`;
+      $('#sidebarFooter').innerHTML = `<b>${count}</b> worker${count!==1?'s':''} &middot; fleet total <b>$${cost.toFixed(4)}</b>`;
+    }
+  } catch(e) {}
+}
+
+// ── Init ──────────────────────────────────────────────────
+loadConfig(); // pre-fetch config for spawn modal
+refreshWorkers();
+refreshTasks();
+refreshFleetCost();
+setInterval(refreshWorkers, 10000);
+
+let hasActiveTasks = false;
+(function pollTasks() {
+  setTimeout(async () => {
+    hasActiveTasks = await refreshTasks();
+    if (hasActiveTasks) refreshWorkers(); // refresh worker list faster when tasks running
+    pollTasks();
+  }, hasActiveTasks ? 3000 : 20000);
+})();
+
+// Refresh fleet cost less frequently
+setInterval(refreshFleetCost, 30000);
+
+// Also refresh selected worker detail periodically
+setInterval(() => { if (selected) fetchWorkerDetail(selected); }, 5000);
+
+})();
+</script>
+</body>
+</html>
