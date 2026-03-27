@@ -478,3 +478,83 @@ async function fetchWorkerDetail(name) {
     // Update status badge + sidebar dot
     const st = info.idle ? 'idle' : (info.status === 'working' ? 'working' : info.status);
     if (['idle','working'].includes(st)) liveStatus[name] = st;
+    const badge = $('#wStatus');
+    if (badge) {
+      badge.textContent = st;
+      badge.className = 'worker-bar-status status-' + st;
+    }
+    // Sync sidebar worker list with live status
+    const w = workers.find(x => x.name === name);
+    if (w && w.status !== st && ['idle','working'].includes(st)) {
+      w.status = st;
+      renderWorkerList();
+    }
+    // Update tokens/cost
+    const inp = info.total_input_tokens || 0;
+    const out = info.total_output_tokens || 0;
+    const cost = info.total_cost_usd || 0;
+    const tk = $('#wTokens');
+    const ck = $('#wCost');
+    if (tk) tk.innerHTML = inp || out ? `<b>${fmtNum(inp)}</b> in / <b>${fmtNum(out)}</b> out` : '';
+    if (ck) ck.innerHTML = cost > 0 ? `<b>$${cost.toFixed(4)}</b>` : '';
+    // Info row
+    const row = $('#infoRow');
+    if (row) {
+      row.innerHTML = [
+        chip('Provider', info.provider),
+        chip('IP', info.ip || info.container_id?.slice(0,12)),
+        chip('Model', info.model),
+        chip('VM', info.vm_type),
+        chip('SKU', info.instance_type),
+        chip('Mode', info.communication_mode),
+        chip('Uptime', info.uptime),
+        chip('Session', info.session_id?.slice(0,8)),
+      ].join('');
+    }
+  } catch(e) {}
+}
+
+function chip(label, val) {
+  if (!val || val === 'unknown') return '';
+  return `<span class="info-chip"><b>${esc(val)}</b> ${esc(label)}</span>`;
+}
+
+function fmtNum(n) {
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+// ── Messages Rendering ────────────────────────────────────
+async function fetchMessages(name) {
+  try {
+    const data = await api('/workers/' + encodeURIComponent(name) + '/messages?limit=500');
+    if (selected !== name) return;
+    const container = $('#messages');
+    if (!container) return;
+    container.innerHTML = '';
+    renderedMsgCount = 0;
+    const msgs = data.messages || [];
+    msgs.forEach(m => appendMessage(m));
+    scrollToBottom();
+  } catch(e) {
+    const container = $('#messages');
+    if (container) container.innerHTML = `<div class="msg-system">Failed to load messages</div>`;
+  }
+}
+
+function appendMessage(msg) {
+  const container = $('#messages');
+  if (!container) return;
+  const node = renderMessage(msg);
+  if (!node) return;
+  container.appendChild(node);
+  renderedMsgCount++;
+}
+
+function renderMessage(msg) {
+  const role = msg.role;
+  const type = msg.type;
+
+  // Skip init system messages
+  if (type === 'SystemMessage' && msg.subtype === 'init') return null;
