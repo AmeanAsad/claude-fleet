@@ -558,3 +558,103 @@ function renderMessage(msg) {
 
   // Skip init system messages
   if (type === 'SystemMessage' && msg.subtype === 'init') return null;
+
+  if (role === 'user') {
+    const d = el('div', 'msg msg-user');
+    const content = msg.content;
+    if (typeof content === 'string') {
+      d.appendChild(el('div', 'msg-body', esc(content)));
+    } else if (Array.isArray(content)) {
+      content.forEach(b => {
+        if (b.type === 'TextBlock') d.appendChild(el('div', 'msg-body', esc(b.text)));
+      });
+    }
+    return d;
+  }
+
+  if (role === 'assistant') {
+    const d = el('div', 'msg msg-assistant');
+    const blocks = msg.content || [];
+    blocks.forEach(b => renderBlock(d, b));
+    return d.children.length ? d : null;
+  }
+
+  if (role === 'result' || type === 'ResultMessage') {
+    return null;
+  }
+
+  if (role === 'system') {
+    const content = msg.content;
+    if (typeof content === 'string' && content.trim()) {
+      return el('div', 'msg msg-system', esc(content));
+    }
+    const blocks = Array.isArray(content) ? content : [];
+    const text = blocks.filter(b => b.type === 'TextBlock').map(b => b.text).join('\n');
+    if (text.trim()) return el('div', 'msg msg-system', esc(text));
+    return null;
+  }
+
+  return null;
+}
+
+function renderBlock(parent, block) {
+  const t = block.type;
+  if (t === 'TextBlock') {
+    const text = block.text || '';
+    if (!text.trim()) return;
+    const d = el('div', 'msg-text');
+    d.innerHTML = renderMarkdown(text);
+    parent.appendChild(d);
+  } else if (t === 'ThinkingBlock') {
+    const thinking = block.thinking || '';
+    if (!thinking.trim()) return;
+    const details = document.createElement('details');
+    details.className = 'thinking-block';
+    const preview = thinking.length > 80 ? thinking.slice(0,80) + '...' : thinking;
+    details.innerHTML = `<summary>Thinking: ${esc(preview)}</summary><div class="thinking-content">${esc(thinking)}</div>`;
+    parent.appendChild(details);
+  } else if (t === 'ToolUseBlock') {
+    const tool = block.tool_name || '?';
+    const input = block.tool_input || {};
+    let cmd = tool;
+    if (tool === 'Bash') cmd = '$ ' + (input.command || '');
+    else if (['Read','Write','Edit'].includes(tool)) cmd = (input.file_path || '');
+    else if (['Glob','Grep'].includes(tool)) cmd = (input.pattern || '');
+    const d = el('div', 'tool-use');
+    d.innerHTML = `<span class="tool-name">${esc(tool)}</span><span class="tool-cmd">${esc(cmd)}</span>`;
+    parent.appendChild(d);
+  } else if (t === 'ToolResultBlock') {
+    const content = block.content || '';
+    const isErr = block.is_error;
+    if (!content && !isErr) return;
+    const details = document.createElement('details');
+    details.className = 'tool-result' + (isErr ? ' tool-error' : '');
+    const len = typeof content === 'string' ? content.length : JSON.stringify(content).length;
+    const truncated = typeof content === 'string'
+      ? (content.length > 800 ? content.slice(0,800) + '...' : content)
+      : JSON.stringify(content, null, 2).slice(0, 800);
+    details.innerHTML = `<summary>${isErr ? 'Error' : 'Output'} (${fmtNum(len)} chars)</summary><pre>${esc(truncated)}</pre>`;
+    parent.appendChild(details);
+  }
+}
+
+function renderMarkdown(text) {
+  // Escape HTML first
+  let html = esc(text);
+  // Code blocks: ```lang\n...\n```
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+    `<pre><code>${code}</code></pre>`);
+  // Inline code
+  html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  // Bold
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Italic (but not inside URLs or already processed)
+  html = html.replace(/(?<!\w)\*([^*]+)\*(?!\w)/g, '<em>$1</em>');
+  return html;
+}
+
+function scrollToBottom() {
+  const c = $('#messages');
+  if (c) requestAnimationFrame(() => c.scrollTop = c.scrollHeight);
+}
+
