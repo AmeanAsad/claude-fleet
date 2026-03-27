@@ -228,3 +228,83 @@ input,select{font:inherit}
 </div>
 
 <div class="layout" id="layout">
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <span>Workers</span>
+      <button class="spawn-btn" id="spawnBtn">+ Spawn</button>
+    </div>
+    <div class="worker-list" id="workerList"></div>
+    <div class="task-section" id="taskSection" style="display:none">
+      <div class="sidebar-head"><span>Tasks</span></div>
+      <div id="taskList"></div>
+    </div>
+    <div class="sidebar-footer" id="sidebarFooter"></div>
+  </aside>
+
+  <section class="detail" id="detail">
+    <div class="detail-empty" id="emptyState">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+      Select a worker to view conversation
+    </div>
+  </section>
+</div>
+
+<!-- Spawn modal -->
+<div class="modal-overlay" id="spawnModal">
+  <div class="modal">
+    <h2>Spawn Worker</h2>
+    <div class="field"><label>Name</label><input id="spawnName" placeholder="my-worker" autocomplete="off"></div>
+    <div class="field">
+      <label>Provider</label>
+      <select id="spawnProvider">
+        <option value="">Loading...</option>
+      </select>
+      <div class="field-hint" id="providerHint"></div>
+    </div>
+    <div class="field"><label>VM Type</label>
+      <select id="spawnVmType">
+        <option value="">regular</option>
+        <option value="snp">snp (AMD SEV-SNP)</option>
+        <option value="tdx">tdx (Intel TDX)</option>
+      </select>
+    </div>
+    <div class="field"><label>Model</label><input id="spawnModel" autocomplete="off"></div>
+    <div class="field"><label>Instance type</label><input id="spawnInstance" autocomplete="off"></div>
+    <div class="field"><label>Region</label><input id="spawnRegion" autocomplete="off"></div>
+    <div class="actions">
+      <button class="cancel-btn" id="spawnCancel">Cancel</button>
+      <button class="confirm-btn" id="spawnConfirm">Spawn</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+'use strict';
+
+// ── Helpers ───────────────────────────────────────────────
+const $ = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
+
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+
+function el(tag, cls, html) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (html !== undefined) {
+    if (typeof html === 'string') n.innerHTML = html;
+    else if (html instanceof Node) n.appendChild(html);
+    else if (Array.isArray(html)) html.forEach(c => { if (c instanceof Node) n.appendChild(c); });
+  }
+  return n;
+}
+
+function toast(msg, isError) {
