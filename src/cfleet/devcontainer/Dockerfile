@@ -16,6 +16,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   unzip \
   vim \
   rsync \
+  python3 \
+  python3-pip \
+  python3-venv \
+  curl \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Node.js 22
@@ -30,6 +34,9 @@ USER vscode
 
 # Claude Code CLI
 RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Python deps for worker relay (Agent SDK + web server)
+RUN pip install --no-cache-dir --break-system-packages claude-code-sdk httpx fastapi uvicorn sse-starlette pydantic
 
 ENV PATH="/home/vscode/.local/bin:$PATH"
 ENV TERM=xterm-256color

@@ -206,17 +206,22 @@ def list_workers():
         console.print("No workers. Run [bold]cfleet spawn <name>[/bold] to create one.")
         return
 
-    # Live-check workers that claim to be "working" — update to idle if Claude
-    # Code is actually at its prompt.
+    # Live-check workers that claim to be "working" — update to idle
     state_dirty = False
     for w in workers:
         reachable = w.status == "working" and (w.ip or w.container_id)
         if reachable:
             try:
                 conn = engine._get_conn(w)
-                if conn.is_claude_idle():
-                    w.status = "idle"
-                    state_dirty = True
+                if engine._uses_relay(w):
+                    relay = conn.get_relay_client()
+                    if relay.is_idle():
+                        w.status = "idle"
+                        state_dirty = True
+                else:
+                    if conn.is_claude_idle():
+                        w.status = "idle"
+                        state_dirty = True
                 conn.close()
             except Exception as e:
                 console.print(f"[dim]Could not check {w.name}: {e}[/dim]")
@@ -226,9 +231,8 @@ def list_workers():
     table = Table(title="Fleet Workers")
     table.add_column("Name", style="bold")
     table.add_column("Status")
+    table.add_column("Mode")
     table.add_column("Provider")
-    table.add_column("VM Type")
-    table.add_column("SKU")
     table.add_column("IP")
     table.add_column("Model")
     table.add_column("Last Prompt")
@@ -242,25 +246,21 @@ def list_workers():
         "stopped": "dim",
     }
 
-    vm_type_colors = {
-        "regular": "white",
-        "snp": "magenta",
-        "tdx": "blue",
-        "container": "green",
+    mode_colors = {
+        "relay": "green",
+        "tmux": "yellow",
     }
 
     for w in workers:
         color = status_colors.get(w.status, "white")
-        vt_color = vm_type_colors.get(w.vm_type, "white")
+        m_color = mode_colors.get(w.communication_mode, "white")
         prompt_display = w.last_prompt[:50] + "..." if w.last_prompt and len(w.last_prompt) > 50 else (w.last_prompt or "—")
-        # Show container ID (truncated) for devcontainer, IP for cloud
         target = w.ip or (w.container_id[:12] if w.container_id else "—")
         table.add_row(
             w.name,
             f"[{color}]{w.status}[/{color}]",
+            f"[{m_color}]{w.communication_mode}[/{m_color}]",
             w.provider,
-            f"[{vt_color}]{w.vm_type}[/{vt_color}]",
-            w.instance_type,
             target,
             w.model,
             prompt_display,
@@ -284,6 +284,19 @@ def ask(
 
 
 # --------------------------------------------------------------------------
+# cfleetinterrupt
+# --------------------------------------------------------------------------
+
+@app.command()
+def interrupt(
+    name: str = typer.Argument(..., help="Worker name"),
+):
+    """Interrupt the current agent run on a worker."""
+    engine = _engine()
+    engine.interrupt(name)
+
+
+# --------------------------------------------------------------------------
 # cfleetattach
 # --------------------------------------------------------------------------
 
@@ -291,7 +304,7 @@ def ask(
 def attach(
     name: str = typer.Argument(..., help="Worker name"),
 ):
-    """Attach to a worker's tmux session (interactive). Ctrl+B d to detach."""
+    """Attach to a worker's shell for debugging. Replaces current process."""
     engine = _engine()
     engine.attach(name)
 
@@ -334,9 +347,9 @@ def collect(
 def logs(
     name: str = typer.Argument(..., help="Worker name"),
     follow: bool = typer.Option(False, "--follow", "-f", help="Stream logs continuously"),
-    lines: int = typer.Option(100, "--lines", "-n", help="Number of lines to show"),
+    lines: int = typer.Option(100, "--lines", "-n", help="Number of messages to show"),
 ):
-    """Show tmux output from a worker."""
+    """Show structured conversation logs from a worker."""
     engine = _engine()
     engine.logs(name, lines=lines, follow=follow)
 
@@ -355,19 +368,35 @@ def status(
 
     console.print(f"\n[bold]{info['name']}[/bold]")
     console.print(f"  Status:     {info['status']}")
+    console.print(f"  Mode:       {info.get('communication_mode', 'tmux')}")
     console.print(f"  Provider:   {info['provider']}")
-    console.print(f"  VM Type:    {info['vm_type']}")
-    console.print(f"  SKU:        {info['instance_type']}")
     if info['provider'] == "devcontainer":
         console.print(f"  Container:  {info.get('container_id', '—')[:12] or '—'}")
     else:
         console.print(f"  IP:         {info['ip'] or '—'}")
     console.print(f"  Model:      {info['model']}")
     console.print(f"  Repos:      {', '.join(info['repos']) if info['repos'] else '—'}")
-    console.print(f"  Tmux alive: {info.get('tmux_alive', '—')}")
+
+    # Relay-specific info
+    if info.get('communication_mode') == 'relay':
+        console.print(f"  Relay:      {'[green]alive[/green]' if info.get('relay_alive') else '[red]dead[/red]'}")
+        if info.get('session_id'):
+            console.print(f"  Session:    {info['session_id']}")
+        inp = info.get('total_input_tokens', 0)
+        out = info.get('total_output_tokens', 0)
+        cost = info.get('total_cost_usd', 0.0)
+        if inp or out:
+            console.print(f"  Tokens:     {inp:,} in / {out:,} out")
+            console.print(f"  Cost:       ${cost:.4f}")
+        msg_count = info.get('message_count', 0)
+        if msg_count:
+            console.print(f"  Messages:   {msg_count}")
+    else:
+        console.print(f"  Tmux alive: {info.get('tmux_alive', '—')}")
+
     console.print(f"  Uptime:     {info.get('uptime', '—')}")
     console.print(f"  Created:    {info['created_at']}")
-    if info['last_prompt']:
+    if info.get('last_prompt'):
         console.print(f"  Last prompt: {info['last_prompt']}")
         console.print(f"  Prompt at:   {info['last_prompt_at']}")
     console.print()

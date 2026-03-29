@@ -18,6 +18,8 @@ from pathlib import Path
 
 from rich.console import Console
 
+from cfleet.relay_client import RelayClient
+
 console = Console()
 
 # Container image name for fleet workers
@@ -26,6 +28,9 @@ FLEET_DOCKERFILE = Path(__file__).parent / "devcontainer" / "Dockerfile"
 
 # Labels applied to every fleet container for identification
 FLEET_LABEL = "cfleet.worker"
+
+# Default relay port inside containers
+RELAY_PORT = 8421
 
 
 def _run(cmd: list[str], check: bool = True, capture: bool = True, **kwargs) -> subprocess.CompletedProcess:
@@ -60,6 +65,16 @@ def build_image(force: bool = False) -> None:
     )
 
 
+def _get_container_ip(container_id: str) -> str:
+    """Get the container's IP address on the Docker bridge network."""
+    r = _run([
+        "docker", "inspect", "-f",
+        "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+        container_id,
+    ], check=False)
+    return r.stdout.strip()
+
+
 def spawn_container(
     name: str,
     anthropic_api_key: str,
@@ -74,6 +89,7 @@ def spawn_container(
     env = {
         "ANTHROPIC_API_KEY": anthropic_api_key,
         "CLAUDE_CODE_API_KEY": anthropic_api_key,
+        "CFLEET_MODEL": model,
     }
 
     # Read additional secrets from secrets.env
@@ -118,7 +134,7 @@ def _provision_container(
     repos: list[dict],
     fleet_config,
 ) -> None:
-    """Set up workspace, repos, claude config, tmux inside the container."""
+    """Set up workspace, repos, claude config, and relay inside the container."""
     user = "vscode"
 
     def _exec(cmd: str, user: str = user) -> str:
@@ -163,12 +179,16 @@ def _provision_container(
         _docker_cp(container_id, str(mcp_config), "/home/vscode/.claude/mcp-servers.json", owner=user)
 
     # Claude Code settings
+    # Store API key in a file and use cat to read it (avoids shell injection via echo)
     api_key = fleet_config.anthropic_api_key
+    _exec("mkdir -p /home/vscode/.claude")
+    _exec(f"cat > /home/vscode/.claude/.api-key << 'CFLEET_EOF'\n{api_key}\nCFLEET_EOF")
+    _exec("chmod 600 /home/vscode/.claude/.api-key")
     settings = {
         "model": model,
         "alwaysThinkingEnabled": True,
         "skipDangerousModePermissionPrompt": True,
-        "apiKeyHelper": f"echo {api_key}",
+        "apiKeyHelper": "cat /home/vscode/.claude/.api-key",
         "effortLevel": "high",
         "permissions": {
             "allow": ["Read", "Write", "Edit", "MultiEdit", "Bash(*)", "WebFetch"],
@@ -198,18 +218,29 @@ def _provision_container(
     })
     _exec(f"cat > /home/vscode/.claude/claude.json << 'CFLEET_EOF'\n{trust}\nCFLEET_EOF")
 
-    # Start tmux session
+    # Copy worker relay into the container
+    relay_src = Path(__file__).parent / "worker_relay.py"
+    _docker_cp(container_id, str(relay_src), "/opt/cfleet-relay.py", owner=user)
+
+    # Start the worker relay (replaces tmux-based Claude Code startup)
     _exec(
-        "export TERM=xterm-256color && "
-        "tmux new-session -d -s claude -n code -c /workspace && "
-        f"tmux send-keys -t claude:code 'claude --model {model} --dangerously-skip-permissions' Enter && "
-        "sleep 5 && "
-        "tmux send-keys -t claude:code Enter && "
-        "sleep 2 && "
-        "tmux send-keys -t claude:code Enter && "
-        "tmux new-window -t claude -n bash -c /workspace && "
-        "tmux select-window -t claude:code"
+        f"nohup python3 /opt/cfleet-relay.py "
+        f"--port {RELAY_PORT} --host 0.0.0.0 "
+        f"--model {model} --cwd /workspace "
+        f"> /tmp/cfleet-relay.log 2>&1 &"
     )
+
+    # Wait for relay to start
+    for _ in range(15):
+        time.sleep(1)
+        r = _run(
+            ["docker", "exec", "-u", user, container_id, "bash", "-c",
+             f"curl -sf http://127.0.0.1:{RELAY_PORT}/health"],
+            check=False,
+        )
+        if r.returncode == 0:
+            return
+    console.print("[yellow]Warning: Relay did not respond within 15s, continuing...[/yellow]")
 
 
 def _docker_cp(container_id: str, src: str, dest: str, owner: str | None = None) -> None:
@@ -243,11 +274,14 @@ class WorkerDocker:
     """Docker exec connection to a fleet worker container.
 
     Mirrors the WorkerSSH interface so the engine can use either transparently.
+    Provides relay access for structured communication and legacy tmux methods
+    for backward compatibility.
     """
 
-    def __init__(self, container_id: str, user: str = "vscode"):
+    def __init__(self, container_id: str, user: str = "vscode", relay_port: int = RELAY_PORT):
         self.container_id = container_id
         self.user = user
+        self.relay_port = relay_port
 
     def close(self) -> None:
         pass  # No persistent connection to close
@@ -262,8 +296,51 @@ class WorkerDocker:
         )
         return r.stdout, r.stderr, r.returncode
 
+    # ------------------------------------------------------------------
+    # Relay management
+    # ------------------------------------------------------------------
+
+    def start_relay(self, model: str = "", cwd: str = "/workspace") -> None:
+        """Start the relay if not already running."""
+        _, _, exit_code = self.exec(f"curl -sf http://127.0.0.1:{self.relay_port}/health", timeout=5)
+        if exit_code == 0:
+            return
+
+        # Ensure relay script is present
+        relay_src = Path(__file__).parent / "worker_relay.py"
+        if relay_src.exists():
+            _docker_cp(self.container_id, str(relay_src), "/opt/cfleet-relay.py", owner=self.user)
+
+        model_arg = f"--model {model}" if model else ""
+        self.exec(
+            f"nohup python3 /opt/cfleet-relay.py "
+            f"--port {self.relay_port} --host 0.0.0.0 "
+            f"{model_arg} --cwd {cwd} "
+            f"> /tmp/cfleet-relay.log 2>&1 &",
+            timeout=10,
+        )
+        for _ in range(15):
+            time.sleep(1)
+            _, _, exit_code = self.exec(
+                f"curl -sf http://127.0.0.1:{self.relay_port}/health", timeout=5
+            )
+            if exit_code == 0:
+                return
+
+    def get_relay_client(self) -> RelayClient:
+        """Return a RelayClient connected to this container's relay."""
+        ip = _get_container_ip(self.container_id)
+        if not ip:
+            # Fallback: use docker exec to proxy (less efficient)
+            ip = "127.0.0.1"
+        return RelayClient(f"http://{ip}:{self.relay_port}")
+
+    # ------------------------------------------------------------------
+    # Legacy tmux methods (kept for migration from tmux-based workers)
+    # ------------------------------------------------------------------
+
     def send_prompt(self, text: str) -> None:
-        """Inject text into the tmux claude session."""
+        """Inject text into the tmux claude session (legacy)."""
         self.exec("tmux send-keys -t claude:code Escape")
         time.sleep(0.5)
         escaped = text.replace("'", "'\\''")
@@ -271,10 +348,12 @@ class WorkerDocker:
         self.exec("tmux send-keys -t claude:code Enter")
 
     def read_logs(self, lines: int = 100) -> str:
+        """Capture recent tmux scrollback (legacy)."""
         stdout, _, _ = self.exec(f"tmux capture-pane -t claude:code -p -S -{lines}")
         return stdout
 
     def stream_logs(self, interval: float = 2.0) -> Iterator[str]:
+        """Tail tmux output (legacy)."""
         prev_output = ""
         while True:
             try:
@@ -297,20 +376,22 @@ class WorkerDocker:
             time.sleep(interval)
 
     def is_claude_idle(self) -> bool:
+        """Check idle via tmux (legacy)."""
         stdout, _, _ = self.exec("tmux capture-pane -t claude:code -p -S -5")
         lines = [l.strip() for l in stdout.splitlines() if l.strip()]
         return any(l == "\u276f" or l.startswith("\u276f ") for l in lines)
 
     def is_alive(self) -> bool:
+        """Check if tmux session exists (legacy)."""
         _, _, exit_code = self.exec("tmux has-session -t claude 2>/dev/null")
         return exit_code == 0
 
     def attach(self) -> None:
-        """Attach to the container's tmux session. Replaces current process."""
+        """Attach to the container with a bash shell for debugging."""
         os.execvp(
             "docker",
             ["docker", "exec", "-it", "-u", self.user, self.container_id,
-             "tmux", "attach", "-t", "claude"],
+             "bash", "-l"],
         )
 
     def send_files(self, local_path: str, remote_path: str = "/workspace/inbox/") -> None:

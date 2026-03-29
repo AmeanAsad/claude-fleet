@@ -1,29 +1,102 @@
 ---
-# Start a tmux session with Claude Code running inside it.
-# The session is named "claude" and starts in /workspace.
+# Deploy and start the worker relay service (Agent SDK wrapper).
+# Replaces the legacy tmux-based Claude Code startup.
 
-- name: Check if tmux session already exists
-  ansible.builtin.shell: tmux has-session -t claude 2>/dev/null
-  register: tmux_check
+- name: Create relay directory
+  ansible.builtin.file:
+    path: /opt/cfleet-relay
+    state: directory
+    owner: "{{ ssh_user }}"
+    group: "{{ ssh_user }}"
+    mode: "0755"
+  become: true
+
+- name: Copy worker relay script
+  ansible.builtin.copy:
+    src: "{{ relay_source_dir }}/worker_relay.py"
+    dest: /opt/cfleet-relay/worker_relay.py
+    owner: "{{ ssh_user }}"
+    group: "{{ ssh_user }}"
+    mode: "0644"
+  become: true
+
+- name: Install python3-pip
+  ansible.builtin.apt:
+    name: python3-pip
+    state: present
+  become: true
+
+- name: Check pip version for --break-system-packages support
+  ansible.builtin.shell: python3 -m pip --version | grep -oP '\d+' | head -1
+  register: pip_major
   changed_when: false
-  failed_when: false
+  become: true
+
+- name: Install relay Python dependencies
+  ansible.builtin.pip:
+    name:
+      - claude-code-sdk
+      - httpx
+      - fastapi
+      - uvicorn
+      - sse-starlette
+      - pydantic
+    state: present
+    extra_args: "{{ '--break-system-packages --ignore-installed' if (pip_major.stdout | int) >= 23 else '' }}"
+  become: true
+
+- name: Create relay systemd service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/cfleet-relay.service
+    content: |
+      [Unit]
+      Description=cfleet worker relay
+      After=network.target
+
+      [Service]
+      Type=simple
+      User={{ ssh_user }}
+      WorkingDirectory=/workspace
+      Environment=ANTHROPIC_API_KEY={{ anthropic_api_key }}
+      Environment=CLAUDE_CODE_API_KEY={{ anthropic_api_key }}
+      Environment=CFLEET_MODEL={{ claude_model }}
+      Environment=PATH=/home/{{ ssh_user }}/.local/bin:/usr/local/bin:/usr/bin:/bin
+      ExecStart=/usr/bin/python3 /opt/cfleet-relay/worker_relay.py --port {{ relay_port | default(8421) }} --host 127.0.0.1 --model {{ claude_model }} --cwd /workspace
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+- name: Enable and start relay service
+  ansible.builtin.systemd:
+    name: cfleet-relay
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+
+- name: Wait for relay to be healthy
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ relay_port | default(8421) }}/health"
+    return_content: true
+  register: relay_health
+  until: relay_health.status == 200
+  retries: 15
+  delay: 2
   become: true
   become_user: "{{ ssh_user }}"
 
-- name: Start tmux session with Claude Code and bash windows
+# Keep tmux as a debugging convenience (optional bash shell)
+- name: Start tmux debugging session
   ansible.builtin.shell: |
     export TERM=xterm-256color
-    tmux new-session -d -s claude -n code -c {{ workspace_dir }}
-    tmux send-keys -t claude:code 'source ~/.cfleet-env 2>/dev/null; source ~/.bashrc; claude --model {{ claude_model }} --dangerously-skip-permissions' Enter
-    # Wait for Claude Code to start, then auto-accept trust dialog if it appears
-    sleep 8
-    tmux send-keys -t claude:code Enter
-    sleep 2
-    tmux send-keys -t claude:code Enter
-    # Create bash window
-    tmux new-window -t claude -n bash -c {{ workspace_dir }}
-    tmux send-keys -t claude:bash 'source ~/.cfleet-env 2>/dev/null; source ~/.bashrc' Enter
-    tmux select-window -t claude:code
+    tmux new-session -d -s debug -n bash -c {{ workspace_dir }}
+    tmux send-keys -t debug:bash 'source ~/.cfleet-env 2>/dev/null; source ~/.bashrc' Enter
   become: true
   become_user: "{{ ssh_user }}"
-  when: tmux_check.rc != 0
+  ignore_errors: true

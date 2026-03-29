@@ -129,6 +129,7 @@ class FleetConfig(BaseModel):
     skills_dir: str = "~/.cfleet/skills/"
     claude_md: str = "~/.cfleet/CLAUDE.md"
     mcp_config: str = "~/.cfleet/mcp-servers.json"
+    worker_relay_port: int = 8421
     pulumi: PulumiConfig = PulumiConfig()
     cloud: CloudConfig = CloudConfig()
     api: ApiConfig = ApiConfig()
@@ -207,6 +208,13 @@ class WorkerState(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_prompt: Optional[str] = None
     last_prompt_at: Optional[str] = None
+    # Agent SDK relay fields
+    communication_mode: str = "relay"  # "relay" (Agent SDK) | "tmux" (legacy)
+    session_id: Optional[str] = None
+    relay_port: int = 8421
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cost_usd: float = 0.0
 
 
 class FleetState(BaseModel):

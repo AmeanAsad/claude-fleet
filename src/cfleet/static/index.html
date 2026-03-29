@@ -2,608 +2,947 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2b2a27">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Claude Fleet</title>
 <style>
-  :root {
-    --bg: #0d1117;
-    --bg2: #161b22;
-    --bg3: #21262d;
-    --border: #30363d;
-    --text: #c9d1d9;
-    --text-dim: #8b949e;
-    --accent: #58a6ff;
-    --green: #3fb950;
-    --yellow: #d29922;
-    --red: #f85149;
-    --cyan: #39d2c0;
-    --purple: #bc8cff;
-  }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    height: 100vh;
-    display: flex;
-    flex-direction: column;
-  }
-  header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 20px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg2);
-  }
-  header h1 { font-size: 18px; font-weight: 600; }
-  header .auth-section { display: flex; align-items: center; gap: 8px; }
-  header input {
-    background: var(--bg3);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 4px 8px;
-    border-radius: 4px;
-    font-size: 13px;
-    width: 180px;
-  }
-  .main {
-    flex: 1;
-    display: grid;
-    grid-template-columns: 280px 1fr;
-    overflow: hidden;
-  }
-  @media (max-width: 640px) {
-    .main { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-    .sidebar { max-height: 40vh; }
-  }
+@font-face {
+  font-family: 'Anthropic Sans';
+  src: url('https://cdn.prod.website-files.com/67ce28cfec624e2b733f8a52/69971a00a3295036497e1a28_AnthropicSans-Roman-Web.woff2') format('woff2');
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+</style>
+<link rel="manifest" href="/manifest.json">
+<style>
+@font-face {
+  font-family: 'Anthropic Sans';
+  src: url('https://cdn.prod.website-files.com/67ce28cfec624e2b733f8a52/69971a00a3295036497e1a28_AnthropicSans-Roman-Web.woff2') format('woff2');
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+</style>
+<style>
+/* ── Variables ─────────────────────────────────────────── */
+:root {
+  --accent: #c4633a;
+  --accent-dim: #ae5630;
+  --accent-bright: #d97757;
+  --accent-glow: rgba(196,99,58,0.08);
+  --accent-glow-strong: rgba(196,99,58,0.18);
+  --bg: #1f1e1b;
+  --surface: #2b2a27;
+  --surface-2: #393937;
+  --surface-3: #45443f;
+  --border: rgba(108,106,96,0.25);
+  --border-light: rgba(108,106,96,0.50);
+  --text: #eeeeee;
+  --text-dim: #9a9893;
+  --text-bright: #eeeeee;
+  --green: #86e89a;
+  --yellow: #ffdf61;
+  --red: #df6666;
+  --cyan: #7ab8ff;
+  --font-mono: 'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',monospace;
+}
+/* ── Reset ─────────────────────────────────────────────── */
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{height:100%;-webkit-tap-highlight-color:transparent}
+body{font-family:'Anthropic Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+button{font:inherit;cursor:pointer}
+input,select{font:inherit}
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--border-light)}
 
-  /* Sidebar */
-  .sidebar {
-    border-right: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  .sidebar-section {
-    padding: 12px 16px 8px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    color: var(--text-dim);
-    letter-spacing: 0.5px;
-  }
-  .worker-list {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0 8px;
-  }
-  .worker-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 10px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 14px;
-  }
-  .worker-item:hover { background: var(--bg3); }
-  .worker-item.selected { background: var(--bg3); border: 1px solid var(--border); }
-  .worker-item .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-  .worker-item .name { flex: 1; }
-  .worker-item .status-label { font-size: 12px; color: var(--text-dim); }
-  .dot-idle { background: var(--green); }
-  .dot-working { background: var(--yellow); }
-  .dot-spawning, .dot-provisioning { background: var(--cyan); }
-  .dot-errored { background: var(--red); }
-  .dot-stopped { background: var(--text-dim); }
+/* ── Header ────────────────────────────────────────────── */
+.header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;min-height:48px}
+.header-logo{display:flex;align-items:center;gap:8px;font-weight:700;font-size:15px;color:var(--accent-bright);letter-spacing:-0.3px;white-space:nowrap}
+.header-logo svg{flex-shrink:0}
+.header-spacer{flex:1}
+.fleet-cost{font-size:12px;color:var(--text-dim);font-family:var(--font-mono);white-space:nowrap}
+.fleet-cost b{color:var(--accent);font-weight:600}
+.token-input{background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:6px;font-size:12px;width:140px}
+.token-input:focus{outline:none;border-color:var(--accent-dim)}
+.back-btn{display:none;background:none;border:none;color:var(--accent);font-size:14px;padding:4px 8px}
 
-  .sidebar-actions { padding: 12px; border-top: 1px solid var(--border); }
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 6px 12px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg3);
-    color: var(--text);
-    font-size: 13px;
-    cursor: pointer;
-  }
-  .btn:hover { border-color: var(--accent); color: var(--accent); }
-  .btn-danger:hover { border-color: var(--red); color: var(--red); }
+/* ── Layout ────────────────────────────────────────────── */
+.layout{flex:1;display:grid;grid-template-columns:280px 1fr;overflow:hidden}
 
-  .task-list {
-    overflow-y: auto;
-    max-height: 160px;
-    padding: 0 8px 8px;
-  }
-  .task-item {
-    font-size: 12px;
-    padding: 4px 10px;
-    color: var(--text-dim);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .task-running { color: var(--yellow); }
-  .task-completed { color: var(--green); }
-  .task-failed { color: var(--red); }
+/* ── Sidebar ───────────────────────────────────────────── */
+.sidebar{display:flex;flex-direction:column;border-right:1px solid var(--border);background:var(--surface);overflow:hidden}
+.sidebar-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px 8px}
+.sidebar-head span{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--text-dim)}
+.spawn-btn{background:var(--accent-glow);border:1px solid var(--accent-dim);color:var(--accent);font-size:12px;padding:3px 10px;border-radius:6px;font-weight:500;transition:all .15s}
+.spawn-btn:hover{background:var(--accent-glow-strong);border-color:var(--accent)}
+.worker-list{flex:1;overflow-y:auto;padding:4px 8px}
+.worker-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;cursor:pointer;font-size:13px;transition:background .12s;border:1px solid transparent}
+.worker-item:hover{background:var(--surface-2)}
+.worker-item.active{background:var(--accent-glow);border-color:var(--border-light)}
+.worker-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;transition:background .4s}
+.dot-idle{background:var(--green)}
+.dot-working{background:var(--yellow);animation:pulse 1.5s ease-in-out infinite}
+.dot-spawning,.dot-provisioning{background:var(--cyan);animation:pulse 1s ease-in-out infinite}
+.dot-errored{background:var(--red)}
+.dot-stopped{background:var(--text-dim)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.worker-info-col{flex:1;min-width:0}
+.worker-name{font-weight:500;color:var(--text-bright);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.worker-meta{font-size:11px;color:var(--text-dim);margin-top:1px}
+.worker-cost{font-size:11px;color:var(--accent-dim);font-family:var(--font-mono);flex-shrink:0}
+.sidebar-footer{padding:10px 14px;border-top:1px solid var(--border);font-size:11px;color:var(--text-dim)}
+.sidebar-footer b{color:var(--accent)}
 
-  /* Detail panel */
-  .detail {
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  .detail-empty {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    color: var(--text-dim);
-    font-size: 14px;
-  }
-  .worker-info {
-    padding: 16px 20px;
-    border-bottom: 1px solid var(--border);
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-    gap: 8px;
-  }
-  .info-item { font-size: 13px; }
-  .info-item .label { color: var(--text-dim); font-size: 11px; }
-  .info-item .value { font-weight: 500; }
+/* tasks */
+.task-section{border-top:1px solid var(--border);max-height:140px;overflow-y:auto}
+.task-section .sidebar-head{padding-top:8px;padding-bottom:4px}
+.task-item{font-size:11px;padding:3px 14px;color:var(--text-dim);display:flex;align-items:center;gap:6px}
+.task-item .status{font-weight:500}
+.task-item .status-running{color:var(--yellow)}
+.task-item .status-completed{color:var(--green)}
+.task-item .status-failed{color:var(--red)}
 
-  .log-panel {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px 20px;
-    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
-    font-size: 12px;
-    line-height: 1.6;
-    white-space: pre-wrap;
-    word-break: break-all;
-    background: var(--bg);
-  }
+/* ── Detail Panel ──────────────────────────────────────── */
+.detail{display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
+.detail-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--text-dim);font-size:14px;padding:20px}
+.detail-empty svg{opacity:.3}
 
-  .prompt-bar {
-    display: flex;
-    gap: 8px;
-    padding: 12px 20px;
-    border-top: 1px solid var(--border);
-    background: var(--bg2);
-  }
-  .prompt-bar input {
-    flex: 1;
-    background: var(--bg3);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 8px 12px;
-    border-radius: 6px;
-    font-size: 14px;
-  }
-  .prompt-bar input:focus { outline: none; border-color: var(--accent); }
-  .prompt-bar .btn { white-space: nowrap; }
+/* Worker bar */
+.worker-bar{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0;flex-wrap:wrap}
+.worker-bar-name{font-weight:600;font-size:14px;color:var(--text-bright)}
+.worker-bar-status{font-size:11px;padding:2px 8px;border-radius:10px;font-weight:500}
+.status-idle{background:rgba(134,232,154,.12);color:var(--green)}
+.status-working{background:rgba(255,223,97,.12);color:var(--yellow)}
+.status-spawning,.status-provisioning{background:rgba(122,184,255,.12);color:var(--cyan)}
+.status-errored{background:rgba(223,102,102,.12);color:var(--red)}
+.worker-bar-spacer{flex:1}
+.worker-bar-stat{font-size:11px;color:var(--text-dim);font-family:var(--font-mono)}
+.worker-bar-stat b{color:var(--accent);font-weight:500}
+.bar-btn{background:none;border:1px solid var(--border);color:var(--text-dim);font-size:12px;padding:4px 10px;border-radius:6px;transition:all .15s}
+.bar-btn:hover{border-color:var(--text);color:var(--text)}
+.bar-btn-danger:hover{border-color:var(--red);color:var(--red)}
+.bar-btn-warn:hover{border-color:var(--yellow);color:var(--yellow)}
 
-  /* Modal */
-  .modal-overlay {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.6);
-    z-index: 100;
-    align-items: center;
-    justify-content: center;
-  }
-  .modal-overlay.open { display: flex; }
-  .modal {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 24px;
-    min-width: 340px;
-    max-width: 90vw;
-  }
-  .modal h2 { font-size: 16px; margin-bottom: 16px; }
-  .modal .field { margin-bottom: 12px; }
-  .modal label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
-  .modal input, .modal select {
-    width: 100%;
-    background: var(--bg3);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 6px 10px;
-    border-radius: 4px;
-    font-size: 13px;
-  }
-  .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+/* Info row (expandable) */
+.info-row{display:none;padding:8px 16px;border-bottom:1px solid var(--border);background:var(--surface-2);gap:16px;flex-wrap:wrap;font-size:12px}
+.info-row.open{display:flex}
+.info-chip{color:var(--text-dim)}
+.info-chip b{color:var(--text);font-weight:500}
+
+/* ── Messages ──────────────────────────────────────────── */
+.messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:4px}
+.msg{padding:8px 0;animation:fadeIn .2s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.msg-user{border-left:3px solid var(--accent);padding-left:12px;margin:8px 0 4px}
+.msg-user .msg-body{color:var(--text-bright);font-size:14px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.msg-assistant .msg-text{font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.msg-assistant .msg-text code{background:var(--surface-3);padding:1px 5px;border-radius:3px;font-family:var(--font-mono);font-size:12px}
+.msg-assistant .msg-text pre{background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin:8px 0;overflow-x:auto;font-family:var(--font-mono);font-size:12px;line-height:1.5}
+.msg-assistant .msg-text pre code{background:none;padding:0}
+
+/* thinking */
+.thinking-block{margin:4px 0;border-left:2px solid var(--border);padding-left:10px}
+.thinking-block summary{font-size:11px;color:var(--text-dim);cursor:pointer;user-select:none;font-style:italic}
+.thinking-block summary:hover{color:var(--text)}
+.thinking-block .thinking-content{font-size:12px;color:var(--text-dim);font-style:italic;line-height:1.5;white-space:pre-wrap;margin-top:4px;max-height:300px;overflow-y:auto}
+
+/* tool use */
+.tool-use{display:flex;align-items:center;gap:6px;margin:4px 0;padding:5px 10px;background:var(--surface-2);border:1px solid var(--border);border-radius:6px;font-family:var(--font-mono);font-size:12px;overflow:hidden}
+.tool-name{color:var(--cyan);font-weight:600;flex-shrink:0}
+.tool-cmd{color:var(--text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* tool result */
+.tool-result{margin:2px 0;font-size:12px}
+.tool-result summary{color:var(--text-dim);cursor:pointer;font-size:11px;font-family:var(--font-mono)}
+.tool-result summary:hover{color:var(--text)}
+.tool-result pre{background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:8px;margin-top:4px;font-family:var(--font-mono);font-size:11px;line-height:1.4;white-space:pre-wrap;word-break:break-all;max-height:200px;overflow-y:auto;color:var(--text-dim)}
+.tool-error summary{color:var(--red)}
+.tool-error pre{border-color:rgba(223,102,102,.2);color:var(--red)}
+
+/* result summary */
+.msg-result{text-align:center;padding:4px 0;margin:4px 0}
+.result-line{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-family:var(--font-mono);color:var(--text-dim);padding:3px 12px;background:var(--surface-2);border-radius:10px}
+.result-line .cost{color:var(--accent)}
+
+/* system */
+.msg-system{font-size:11px;color:var(--text-dim);padding:2px 0;font-style:italic}
+
+/* ── Prompt Bar ────────────────────────────────────────── */
+.prompt-bar{display:flex;gap:8px;padding:10px 16px;border-top:1px solid var(--border);background:var(--surface);flex-shrink:0}
+.prompt-input{flex:1;background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:8px;font-size:14px;resize:none;min-height:42px;max-height:120px;line-height:1.4}
+.prompt-input:focus{outline:none;border-color:var(--accent-dim);box-shadow:0 0 0 2px var(--accent-glow)}
+.prompt-input::placeholder{color:var(--text-dim)}
+.send-btn{background:var(--accent-glow-strong);border:1px solid var(--accent-dim);color:var(--accent);padding:0 16px;border-radius:8px;font-weight:600;font-size:13px;transition:all .15s;white-space:nowrap}
+.send-btn:hover{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+
+/* ── Modal ─────────────────────────────────────────────── */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);z-index:100;align-items:center;justify-content:center;padding:20px}
+.modal-overlay.open{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;width:100%;max-width:400px;animation:modalIn .2s ease}
+@keyframes modalIn{from{opacity:0;transform:scale(.95)}to{opacity:1;transform:none}}
+.modal h2{font-size:15px;font-weight:600;color:var(--text-bright);margin-bottom:16px}
+.modal .field{margin-bottom:12px}
+.modal label{display:block;font-size:11px;color:var(--text-dim);margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px}
+.modal .field-hint{font-size:10px;color:var(--text-dim);margin-top:2px;font-style:italic}
+.modal input,.modal select{width:100%;background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:6px;font-size:13px}
+.modal input:focus,.modal select:focus{outline:none;border-color:var(--accent-dim)}
+.modal select option{background:var(--surface-2);color:var(--text)}
+.modal .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:18px}
+.modal .cancel-btn{background:none;border:1px solid var(--border);color:var(--text-dim);padding:6px 14px;border-radius:6px;font-size:13px}
+.modal .cancel-btn:hover{border-color:var(--text);color:var(--text)}
+.modal .confirm-btn{background:var(--accent-glow-strong);border:1px solid var(--accent-dim);color:var(--accent);padding:6px 14px;border-radius:6px;font-size:13px;font-weight:600}
+.modal .confirm-btn:hover{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+
+/* ── Toast ─────────────────────────────────────────────── */
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:8px 16px;border-radius:8px;font-size:13px;z-index:200;opacity:0;transition:opacity .3s;pointer-events:none}
+.toast.visible{opacity:1}
+.toast.error{border-color:rgba(223,102,102,.3);color:var(--red)}
+
+/* ── Mobile ────────────────────────────────────────────── */
+@media(max-width:768px){
+  .layout{grid-template-columns:1fr}
+  .sidebar{position:absolute;inset:0;top:48px;z-index:10;transition:transform .25s ease}
+  .layout.detail-open .sidebar{transform:translateX(-100%)}
+  .detail{position:absolute;inset:0;top:48px;z-index:9;transform:translateX(100%);transition:transform .25s ease}
+  .layout.detail-open .detail{transform:translateX(0)}
+  .back-btn{display:block}
+  .token-input{width:100px}
+  .worker-bar{padding:8px 12px}
+  .messages{padding:12px}
+  .prompt-bar{padding:8px 12px}
+  .prompt-input{padding:8px 12px;font-size:16px /* prevent iOS zoom */}
+}
+@media(max-width:360px){
+  .header-logo span{display:none}
+  .fleet-cost{font-size:11px}
+}
 </style>
 </head>
 <body>
 
-<header>
-  <h1>Claude Fleet</h1>
-  <div class="auth-section">
-    <input id="tokenInput" type="password" placeholder="API token (if required)">
+<div class="header">
+  <button class="back-btn" id="backBtn" aria-label="Back">&larr;</button>
+  <div class="header-logo">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+    <span>Claude Fleet</span>
   </div>
-</header>
+  <div class="header-spacer"></div>
+  <div class="fleet-cost" id="fleetCost"></div>
+  <input class="token-input" id="tokenInput" type="password" placeholder="API token" autocomplete="off">
+</div>
 
-<div class="main">
-  <div class="sidebar">
-    <div class="sidebar-section">Workers</div>
-    <div class="worker-list" id="workerList"></div>
-
-    <div class="sidebar-actions">
-      <button class="btn" id="spawnBtn">+ Spawn</button>
+<div class="layout" id="layout">
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <span>Workers</span>
+      <button class="spawn-btn" id="spawnBtn">+ Spawn</button>
     </div>
+    <div class="worker-list" id="workerList"></div>
+    <div class="task-section" id="taskSection" style="display:none">
+      <div class="sidebar-head"><span>Tasks</span></div>
+      <div id="taskList"></div>
+    </div>
+    <div class="sidebar-footer" id="sidebarFooter"></div>
+  </aside>
 
-    <div class="sidebar-section">Tasks</div>
-    <div class="task-list" id="taskList"></div>
-  </div>
-
-  <div class="detail" id="detailPanel">
-    <div class="detail-empty" id="emptyState">Select a worker to view details</div>
-  </div>
+  <section class="detail" id="detail">
+    <div class="detail-empty" id="emptyState">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+      Select a worker to view conversation
+    </div>
+  </section>
 </div>
 
 <!-- Spawn modal -->
 <div class="modal-overlay" id="spawnModal">
   <div class="modal">
     <h2>Spawn Worker</h2>
+    <div class="field"><label>Name</label><input id="spawnName" placeholder="my-worker" autocomplete="off"></div>
     <div class="field">
-      <label>Name</label>
-      <input id="spawnName" placeholder="my-worker">
+      <label>Provider</label>
+      <select id="spawnProvider">
+        <option value="">Loading...</option>
+      </select>
+      <div class="field-hint" id="providerHint"></div>
     </div>
-    <div class="field">
-      <label>VM Type</label>
+    <div class="field"><label>VM Type</label>
       <select id="spawnVmType">
-        <option value="">regular (default)</option>
+        <option value="">regular</option>
         <option value="snp">snp (AMD SEV-SNP)</option>
         <option value="tdx">tdx (Intel TDX)</option>
       </select>
     </div>
-    <div class="field">
-      <label>Model (optional)</label>
-      <input id="spawnModel" placeholder="claude-opus-4-6">
-    </div>
-    <div class="field">
-      <label>Instance Type (optional — auto from provider + vm type)</label>
-      <input id="spawnInstance" placeholder="auto">
-    </div>
+    <div class="field"><label>Model</label><input id="spawnModel" autocomplete="off"></div>
+    <div class="field"><label>Instance type</label><input id="spawnInstance" autocomplete="off"></div>
+    <div class="field"><label>Region</label><input id="spawnRegion" autocomplete="off"></div>
     <div class="actions">
-      <button class="btn" id="spawnCancelBtn">Cancel</button>
-      <button class="btn" id="spawnConfirmBtn">Spawn</button>
+      <button class="cancel-btn" id="spawnCancel">Cancel</button>
+      <button class="confirm-btn" id="spawnConfirm">Spawn</button>
     </div>
   </div>
 </div>
 
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
 <script>
-(function() {
-  'use strict';
+(function(){
+'use strict';
 
-  const $ = (sel) => document.querySelector(sel);
-  let selectedWorker = null;
-  let logSource = null;
+// ── Helpers ───────────────────────────────────────────────
+const $ = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
 
-  const STATUS_DOT_CLASS = {
-    idle: 'dot-idle', working: 'dot-working',
-    spawning: 'dot-spawning', provisioning: 'dot-provisioning',
-    errored: 'dot-errored', stopped: 'dot-stopped',
-  };
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = String(s);
+  return d.innerHTML;
+}
 
-  // --- Token ---
-
-  function getToken() {
-    return localStorage.getItem('cfleet_token') || $('#tokenInput').value || '';
+function el(tag, cls, html) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (html !== undefined) {
+    if (typeof html === 'string') n.innerHTML = html;
+    else if (html instanceof Node) n.appendChild(html);
+    else if (Array.isArray(html)) html.forEach(c => { if (c instanceof Node) n.appendChild(c); });
   }
+  return n;
+}
 
-  $('#tokenInput').addEventListener('change', function(e) {
-    localStorage.setItem('cfleet_token', e.target.value);
+function toast(msg, isError) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = 'toast visible' + (isError ? ' error' : '');
+  clearTimeout(t._tid);
+  t._tid = setTimeout(() => t.className = 'toast', 3000);
+}
+
+// ── Token ─────────────────────────────────────────────────
+function getToken() { return localStorage.getItem('cfleet_token') || $('#tokenInput').value || ''; }
+$('#tokenInput').addEventListener('change', e => localStorage.setItem('cfleet_token', e.target.value));
+{ const s = localStorage.getItem('cfleet_token'); if (s) $('#tokenInput').value = s; }
+
+// ── API ───────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const token = getToken();
+  const headers = opts.headers || {};
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  if (opts.body && typeof opts.body === 'object') {
+    headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(opts.body);
+  }
+  const res = await fetch('/api' + path, { ...opts, headers });
+  if (res.status === 401) { $('#tokenInput').focus(); throw new Error('Auth required'); }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || 'Request failed');
+  }
+  return res.json();
+}
+
+// ── State ─────────────────────────────────────────────────
+let workers = [];
+let workerCosts = {};  // name -> cost from fleet usage
+let selected = null;  // worker name
+let logSource = null;
+let msgPollTimer = null;
+let renderedMsgCount = 0;
+let fleetConfig = null; // cached from /api/config
+let liveStatus = {}; // name -> 'idle'|'working' from relay, survives list refreshes
+
+// ── Worker List ───────────────────────────────────────────
+async function refreshWorkers() {
+  try {
+    workers = await api('/workers');
+    // Apply live relay statuses over stale state-file statuses
+    workers.forEach(w => {
+      if (liveStatus[w.name] && (w.status === 'working' || w.status === 'idle')) {
+        w.status = liveStatus[w.name];
+      }
+    });
+    renderWorkerList();
+  } catch(e) { /* retry next cycle */ }
+}
+
+function renderWorkerList() {
+  const list = $('#workerList');
+  list.innerHTML = '';
+  workers.forEach(w => {
+    const item = el('div', 'worker-item' + (selected === w.name ? ' active' : ''));
+    item.onclick = () => selectWorker(w.name);
+    const dotCls = ({idle:'dot-idle',working:'dot-working',spawning:'dot-spawning',provisioning:'dot-provisioning',errored:'dot-errored',stopped:'dot-stopped'})[w.status] || '';
+    item.innerHTML = `
+      <div class="worker-dot ${dotCls}"></div>
+      <div class="worker-info-col">
+        <div class="worker-name">${esc(w.name)}</div>
+        <div class="worker-meta">${esc(w.status)} &middot; ${esc(w.provider)}${w.model ? ' &middot; ' + esc(w.model) : ''}</div>
+      </div>
+      <div class="worker-cost">${(workerCosts[w.name] || w.total_cost_usd) > 0 ? '$' + (workerCosts[w.name] || w.total_cost_usd).toFixed(2) : ''}</div>`;
+    list.appendChild(item);
+  });
+  updateFleetCost();
+}
+
+function updateFleetCost() {
+  // Only show worker count here; cost is updated solely by refreshFleetCost()
+  // to avoid flickering between two data sources
+  const count = workers.length;
+  if (count > 0) {
+    if (!$('#fleetCost').innerHTML) $('#fleetCost').innerHTML = `<b>${count}</b> worker${count !== 1 ? 's' : ''}`;
+    if (!$('#sidebarFooter').innerHTML) $('#sidebarFooter').innerHTML = `<b>${count}</b> worker${count !== 1 ? 's' : ''}`;
+  } else {
+    $('#fleetCost').textContent = 'No workers';
+    $('#sidebarFooter').textContent = 'No workers running';
+  }
+}
+
+// ── Tasks ─────────────────────────────────────────────────
+async function refreshTasks() {
+  try {
+    const tasks = await api('/tasks');
+    const sec = $('#taskSection');
+    const list = $('#taskList');
+    if (!tasks.length) { sec.style.display = 'none'; return; }
+    sec.style.display = '';
+    list.innerHTML = '';
+    tasks.forEach(t => {
+      const statusCls = 'status-' + t.status;
+      list.innerHTML += `<div class="task-item"><span class="status ${statusCls}">${esc(t.status)}</span> ${esc(t.operation)} <b>${esc(t.worker_name)}</b>${t.error ? ' <span style="color:var(--red)">' + esc(t.error) + '</span>' : ''}</div>`;
+    });
+    return tasks.some(t => t.status === 'running');
+  } catch(e) { return false; }
+}
+
+// ── Select Worker ─────────────────────────────────────────
+async function selectWorker(name) {
+  selected = name;
+  renderedMsgCount = 0;
+  renderWorkerList();
+  $('#layout').classList.add('detail-open');
+
+  const detail = $('#detail');
+  detail.innerHTML = '';
+
+  // Worker bar
+  const w = workers.find(x => x.name === name) || { name, status: '...' };
+  const bar = el('div', 'worker-bar', `
+    <div class="worker-bar-name">${esc(name)}</div>
+    <div class="worker-bar-status status-${w.status}" id="wStatus">${esc(w.status)}</div>
+    <div class="worker-bar-spacer"></div>
+    <div class="worker-bar-stat" id="wTokens"></div>
+    <div class="worker-bar-stat" id="wCost"></div>
+    <button class="bar-btn" id="infoToggle">Info</button>
+    <button class="bar-btn bar-btn-warn" id="interruptBtn">Interrupt</button>
+    <button class="bar-btn bar-btn-danger" id="killBtn">Kill</button>`);
+  detail.appendChild(bar);
+
+  // Info row (hidden by default)
+  const info = el('div', 'info-row', '');
+  info.id = 'infoRow';
+  detail.appendChild(info);
+
+  // Messages
+  const msgs = el('div', 'messages', '');
+  msgs.id = 'messages';
+  detail.appendChild(msgs);
+
+  // Prompt bar
+  const pb = el('div', 'prompt-bar', `
+    <textarea class="prompt-input" id="promptInput" placeholder="Send a prompt..." rows="1"></textarea>
+    <button class="send-btn" id="sendBtn">Send</button>`);
+  detail.appendChild(pb);
+
+  // Wire events
+  $('#infoToggle').onclick = () => $('#infoRow').classList.toggle('open');
+  $('#interruptBtn').onclick = interruptWorker;
+  $('#killBtn').onclick = killWorker;
+  $('#sendBtn').onclick = sendPrompt;
+  $('#promptInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendPrompt(); }
+  });
+  // Auto-resize textarea
+  $('#promptInput').addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 120) + 'px';
   });
 
-  const saved = localStorage.getItem('cfleet_token');
-  if (saved) $('#tokenInput').value = saved;
+  // Load data
+  fetchWorkerDetail(name);
+  fetchMessages(name);
+  connectSSE(name);
+  startMsgPoll(name);
+}
 
-  // --- API helper ---
+async function fetchWorkerDetail(name) {
+  try {
+    const info = await api('/workers/' + encodeURIComponent(name));
+    if (selected !== name) return;
+    // Update status badge + sidebar dot
+    const st = info.idle ? 'idle' : (info.status === 'working' ? 'working' : info.status);
+    if (['idle','working'].includes(st)) liveStatus[name] = st;
+    const badge = $('#wStatus');
+    if (badge) {
+      badge.textContent = st;
+      badge.className = 'worker-bar-status status-' + st;
+    }
+    // Sync sidebar worker list with live status
+    const w = workers.find(x => x.name === name);
+    if (w && w.status !== st && ['idle','working'].includes(st)) {
+      w.status = st;
+      renderWorkerList();
+    }
+    // Update tokens/cost
+    const inp = info.total_input_tokens || 0;
+    const out = info.total_output_tokens || 0;
+    const cost = info.total_cost_usd || 0;
+    const tk = $('#wTokens');
+    const ck = $('#wCost');
+    if (tk) tk.innerHTML = inp || out ? `<b>${fmtNum(inp)}</b> in / <b>${fmtNum(out)}</b> out` : '';
+    if (ck) ck.innerHTML = cost > 0 ? `<b>$${cost.toFixed(4)}</b>` : '';
+    // Info row
+    const row = $('#infoRow');
+    if (row) {
+      row.innerHTML = [
+        chip('Provider', info.provider),
+        chip('IP', info.ip || info.container_id?.slice(0,12)),
+        chip('Model', info.model),
+        chip('VM', info.vm_type),
+        chip('SKU', info.instance_type),
+        chip('Mode', info.communication_mode),
+        chip('Uptime', info.uptime),
+        chip('Session', info.session_id?.slice(0,8)),
+      ].join('');
+    }
+  } catch(e) {}
+}
 
-  async function api(path, opts) {
-    opts = opts || {};
-    const token = getToken();
-    const headers = opts.headers || {};
-    if (token) headers['Authorization'] = 'Bearer ' + token;
-    if (opts.body && typeof opts.body === 'object') {
-      headers['Content-Type'] = 'application/json';
-      opts.body = JSON.stringify(opts.body);
-    }
-    const res = await fetch('/api' + path, Object.assign({}, opts, { headers: headers }));
-    if (res.status === 401) {
-      $('#tokenInput').focus();
-      throw new Error('Authentication required');
-    }
-    if (!res.ok) {
-      const err = await res.json().catch(function() { return { detail: res.statusText }; });
-      throw new Error(err.detail || 'Request failed');
-    }
-    return res.json();
+function chip(label, val) {
+  if (!val || val === 'unknown') return '';
+  return `<span class="info-chip"><b>${esc(val)}</b> ${esc(label)}</span>`;
+}
+
+function fmtNum(n) {
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+// ── Messages Rendering ────────────────────────────────────
+async function fetchMessages(name) {
+  try {
+    const data = await api('/workers/' + encodeURIComponent(name) + '/messages?limit=500');
+    if (selected !== name) return;
+    const container = $('#messages');
+    if (!container) return;
+    container.innerHTML = '';
+    renderedMsgCount = 0;
+    const msgs = data.messages || [];
+    msgs.forEach(m => appendMessage(m));
+    scrollToBottom();
+  } catch(e) {
+    const container = $('#messages');
+    if (container) container.innerHTML = `<div class="msg-system">Failed to load messages</div>`;
   }
+}
 
-  // --- DOM helpers ---
+function appendMessage(msg) {
+  const container = $('#messages');
+  if (!container) return;
+  const node = renderMessage(msg);
+  if (!node) return;
+  container.appendChild(node);
+  renderedMsgCount++;
+}
 
-  function el(tag, attrs, children) {
-    const node = document.createElement(tag);
-    if (attrs) {
-      Object.keys(attrs).forEach(function(k) {
-        if (k === 'className') node.className = attrs[k];
-        else if (k.startsWith('on')) node.addEventListener(k.slice(2).toLowerCase(), attrs[k]);
-        else node.setAttribute(k, attrs[k]);
+function renderMessage(msg) {
+  const role = msg.role;
+  const type = msg.type;
+
+  // Skip init system messages
+  if (type === 'SystemMessage' && msg.subtype === 'init') return null;
+
+  if (role === 'user') {
+    const d = el('div', 'msg msg-user');
+    const content = msg.content;
+    if (typeof content === 'string') {
+      d.appendChild(el('div', 'msg-body', esc(content)));
+    } else if (Array.isArray(content)) {
+      content.forEach(b => {
+        if (b.type === 'TextBlock') d.appendChild(el('div', 'msg-body', esc(b.text)));
       });
     }
-    if (children) {
-      if (!Array.isArray(children)) children = [children];
-      children.forEach(function(c) {
-        if (typeof c === 'string') node.appendChild(document.createTextNode(c));
-        else if (c) node.appendChild(c);
-      });
-    }
-    return node;
+    return d;
   }
 
-  // --- Worker list ---
+  if (role === 'assistant') {
+    const d = el('div', 'msg msg-assistant');
+    const blocks = msg.content || [];
+    blocks.forEach(b => renderBlock(d, b));
+    return d.children.length ? d : null;
+  }
 
-  async function refreshWorkers() {
+  if (role === 'result' || type === 'ResultMessage') {
+    return null;
+  }
+
+  if (role === 'system') {
+    const content = msg.content;
+    if (typeof content === 'string' && content.trim()) {
+      return el('div', 'msg msg-system', esc(content));
+    }
+    const blocks = Array.isArray(content) ? content : [];
+    const text = blocks.filter(b => b.type === 'TextBlock').map(b => b.text).join('\n');
+    if (text.trim()) return el('div', 'msg msg-system', esc(text));
+    return null;
+  }
+
+  return null;
+}
+
+function renderBlock(parent, block) {
+  const t = block.type;
+  if (t === 'TextBlock') {
+    const text = block.text || '';
+    if (!text.trim()) return;
+    const d = el('div', 'msg-text');
+    d.innerHTML = renderMarkdown(text);
+    parent.appendChild(d);
+  } else if (t === 'ThinkingBlock') {
+    const thinking = block.thinking || '';
+    if (!thinking.trim()) return;
+    const details = document.createElement('details');
+    details.className = 'thinking-block';
+    const preview = thinking.length > 80 ? thinking.slice(0,80) + '...' : thinking;
+    details.innerHTML = `<summary>Thinking: ${esc(preview)}</summary><div class="thinking-content">${esc(thinking)}</div>`;
+    parent.appendChild(details);
+  } else if (t === 'ToolUseBlock') {
+    const tool = block.tool_name || '?';
+    const input = block.tool_input || {};
+    let cmd = tool;
+    if (tool === 'Bash') cmd = '$ ' + (input.command || '');
+    else if (['Read','Write','Edit'].includes(tool)) cmd = (input.file_path || '');
+    else if (['Glob','Grep'].includes(tool)) cmd = (input.pattern || '');
+    const d = el('div', 'tool-use');
+    d.innerHTML = `<span class="tool-name">${esc(tool)}</span><span class="tool-cmd">${esc(cmd)}</span>`;
+    parent.appendChild(d);
+  } else if (t === 'ToolResultBlock') {
+    const content = block.content || '';
+    const isErr = block.is_error;
+    if (!content && !isErr) return;
+    const details = document.createElement('details');
+    details.className = 'tool-result' + (isErr ? ' tool-error' : '');
+    const len = typeof content === 'string' ? content.length : JSON.stringify(content).length;
+    const truncated = typeof content === 'string'
+      ? (content.length > 800 ? content.slice(0,800) + '...' : content)
+      : JSON.stringify(content, null, 2).slice(0, 800);
+    details.innerHTML = `<summary>${isErr ? 'Error' : 'Output'} (${fmtNum(len)} chars)</summary><pre>${esc(truncated)}</pre>`;
+    parent.appendChild(details);
+  }
+}
+
+function renderMarkdown(text) {
+  // Escape HTML first
+  let html = esc(text);
+  // Code blocks: ```lang\n...\n```
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+    `<pre><code>${code}</code></pre>`);
+  // Inline code
+  html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  // Bold
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Italic (but not inside URLs or already processed)
+  html = html.replace(/(?<!\w)\*([^*]+)\*(?!\w)/g, '<em>$1</em>');
+  return html;
+}
+
+function scrollToBottom() {
+  const c = $('#messages');
+  if (c) requestAnimationFrame(() => c.scrollTop = c.scrollHeight);
+}
+
+// ── SSE Connection ────────────────────────────────────────
+function connectSSE(name) {
+  if (logSource) { logSource.close(); logSource = null; }
+  const token = getToken();
+  const url = '/api/workers/' + encodeURIComponent(name) + '/logs' + (token ? '?token=' + encodeURIComponent(token) : '');
+  logSource = new EventSource(url);
+
+  logSource.addEventListener('message', e => {
+    if (selected !== name) return;
     try {
-      var workers = await api('/workers');
-      var list = $('#workerList');
-      list.replaceChildren();
+      const data = JSON.parse(e.data);
+      if (data.message) appendMessage(data.message);
+      scrollToBottom();
+    } catch(ex) {}
+  });
 
-      workers.forEach(function(w) {
-        workerCache[w.name] = w;
-        var item = el('div', {
-          className: 'worker-item' + (selectedWorker === w.name ? ' selected' : ''),
-          onClick: function() { selectWorker(w.name); }
-        }, [
-          el('span', { className: 'dot ' + (STATUS_DOT_CLASS[w.status] || '') }),
-          el('span', { className: 'name' }, w.name),
-          el('span', { className: 'status-label' }, w.status),
-        ]);
-        list.appendChild(item);
-      });
-    } catch (e) {
-      // silently retry next cycle
-    }
-  }
-
-  // --- Task list ---
-
-  async function refreshTasks() {
+  logSource.addEventListener('status', e => {
+    if (selected !== name) return;
     try {
-      const tasks = await api('/tasks');
-      const list = $('#taskList');
-      list.replaceChildren();
+      const data = JSON.parse(e.data);
+      const st = data.idle ? 'idle' : 'working';
+      const badge = $('#wStatus');
+      if (badge) {
+        badge.textContent = st;
+        badge.className = 'worker-bar-status status-' + st;
+      }
+      // Sync sidebar dot + persist
+      liveStatus[name] = st;
+      const w = workers.find(x => x.name === name);
+      if (w && w.status !== st) { w.status = st; renderWorkerList(); }
+      const tk = $('#wTokens');
+      const ck = $('#wCost');
+      if (tk && (data.total_input_tokens || data.total_output_tokens)) {
+        tk.innerHTML = `<b>${fmtNum(data.total_input_tokens||0)}</b> in / <b>${fmtNum(data.total_output_tokens||0)}</b> out`;
+      }
+      if (ck && data.total_cost_usd > 0) {
+        ck.innerHTML = `<b>$${data.total_cost_usd.toFixed(4)}</b>`;
+      }
+    } catch(ex) {}
+  });
 
-      tasks.forEach(function(t) {
-        const children = [
-          el('span', { className: 'task-' + t.status }, t.status),
-          el('span', null, ' ' + t.operation + ' ' + t.worker_name),
-        ];
-        if (t.error) {
-          children.push(el('span', { style: 'color:var(--red)' }, t.error));
-        }
-        list.appendChild(el('div', { className: 'task-item' }, children));
-      });
-    } catch (e) {}
+  logSource.onerror = () => {
+    // EventSource auto-reconnects; no action needed
+  };
+}
+
+// Periodic message sync to catch anything SSE missed
+function startMsgPoll(name) {
+  if (msgPollTimer) clearInterval(msgPollTimer);
+  msgPollTimer = setInterval(async () => {
+    if (selected !== name) { clearInterval(msgPollTimer); return; }
+    try {
+      const data = await api('/workers/' + encodeURIComponent(name) + '/messages?limit=500');
+      const msgs = data.messages || [];
+      if (msgs.length > renderedMsgCount) {
+        // New messages arrived that SSE may have missed; re-render
+        const container = $('#messages');
+        if (!container) return;
+        container.innerHTML = '';
+        renderedMsgCount = 0;
+        msgs.forEach(m => appendMessage(m));
+        scrollToBottom();
+      }
+    } catch(e) {}
+  }, 8000);
+}
+
+// ── Actions ───────────────────────────────────────────────
+async function sendPrompt() {
+  const input = $('#promptInput');
+  if (!input || !selected) return;
+  const prompt = input.value.trim();
+  if (!prompt) return;
+  input.value = '';
+  input.style.height = 'auto';
+  try {
+    await api('/workers/' + encodeURIComponent(selected) + '/ask', {
+      method: 'POST', body: { prompt }
+    });
+  } catch(e) {
+    toast('Failed: ' + e.message, true);
   }
+}
 
-  // --- Worker detail ---
+async function interruptWorker() {
+  if (!selected) return;
+  try {
+    await api('/workers/' + encodeURIComponent(selected) + '/interrupt', { method: 'POST' });
+    toast('Interrupted ' + selected);
+  } catch(e) { toast('Failed: ' + e.message, true); }
+}
 
-  function buildInfoItem(label, value) {
-    return el('div', { className: 'info-item', 'data-field': label.toLowerCase() }, [
-      el('div', { className: 'label' }, label),
-      el('div', { className: 'value' }, value || '\u2014'),
-    ]);
-  }
-
-  // Cache worker data from list poll so we can render instantly on click
-  var workerCache = {};
-
-  async function selectWorker(name) {
-    selectedWorker = name;
+async function killWorker() {
+  if (!selected || !confirm('Destroy worker "' + selected + '"?')) return;
+  try {
+    await api('/workers/' + encodeURIComponent(selected), { method: 'DELETE' });
+    toast('Destroying ' + selected);
+    goBack();
     refreshWorkers();
+    refreshTasks();
+  } catch(e) { toast('Failed: ' + e.message, true); }
+}
 
-    var detail = $('#detailPanel');
-    detail.replaceChildren();
+// ── Navigation ────────────────────────────────────────────
+function goBack() {
+  if (logSource) { logSource.close(); logSource = null; }
+  if (msgPollTimer) clearInterval(msgPollTimer);
+  selected = null;
+  renderedMsgCount = 0;
+  $('#layout').classList.remove('detail-open');
+  renderWorkerList();
+  const detail = $('#detail');
+  detail.innerHTML = `<div class="detail-empty"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>Select a worker to view conversation</div>`;
+}
 
-    // Build the info panel immediately with cached data from worker list
-    var infoPanel = el('div', { className: 'worker-info', id: 'workerInfo' });
-    var cached = workerCache[name] || {};
-    infoPanel.appendChild(buildInfoItem('Name', cached.name || name));
-    infoPanel.appendChild(buildInfoItem('Status', cached.status || '...'));
-    infoPanel.appendChild(buildInfoItem('Provider', cached.provider || '...'));
-    infoPanel.appendChild(buildInfoItem('IP', cached.ip || '...'));
-    infoPanel.appendChild(buildInfoItem('Model', cached.model || '...'));
-    infoPanel.appendChild(buildInfoItem('VM Type', cached.vm_type || '...'));
-    infoPanel.appendChild(buildInfoItem('SKU', cached.instance_type || '...'));
-    infoPanel.appendChild(buildInfoItem('Tmux', '...'));
-    infoPanel.appendChild(buildInfoItem('Uptime', '...'));
+$('#backBtn').onclick = goBack;
 
-    var logPanel = el('div', { className: 'log-panel', id: 'logOutput' }, 'Connecting...');
+// ── Spawn Modal ───────────────────────────────────────────
+async function loadConfig() {
+  try {
+    fleetConfig = await api('/config');
+  } catch(e) {
+    fleetConfig = null;
+  }
+}
 
-    var promptInput = el('input', { id: 'promptInput', placeholder: 'Send a prompt...' });
-    promptInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') sendPrompt(); });
+function updateSpawnDefaults() {
+  const providerSelect = $('#spawnProvider');
+  const provider = providerSelect.value;
+  if (!fleetConfig) return;
 
-    var sendBtn = el('button', { className: 'btn', onClick: sendPrompt }, 'Send');
-    var killBtn = el('button', { className: 'btn btn-danger', onClick: killWorker }, 'Kill');
-    var promptBar = el('div', { className: 'prompt-bar' }, [promptInput, sendBtn, killBtn]);
+  const pCfg = fleetConfig.providers[provider];
+  if (!pCfg) return;
 
-    detail.appendChild(infoPanel);
-    detail.appendChild(logPanel);
-    detail.appendChild(promptBar);
+  // Update placeholders with actual defaults for selected provider
+  const model = fleetConfig.model || 'claude-opus-4-6';
+  const instance = pCfg.instance_type || '';
+  const region = pCfg.region || '';
 
-    // Fire both in parallel — logs connect immediately, info fetches in background
-    connectLogs(name);
-    fetchWorkerInfo(name);
+  $('#spawnModel').placeholder = model;
+  $('#spawnInstance').placeholder = instance;
+  $('#spawnRegion').placeholder = region;
+
+  // Update hint
+  const hint = $('#providerHint');
+  if (provider === 'devcontainer') {
+    hint.textContent = 'Local Docker container';
+  } else if (provider === 'azure') {
+    hint.textContent = 'Azure VM (' + (pCfg.region || '') + ')';
+  } else if (provider === 'gcp') {
+    hint.textContent = 'Google Cloud VM (' + (pCfg.region || '') + ')';
+  } else {
+    hint.textContent = '';
   }
 
-  async function fetchWorkerInfo(name) {
-    try {
-      var info = await api('/workers/' + name);
-      // Only update if still viewing this worker
-      if (selectedWorker !== name) return;
-      var panel = $('#workerInfo');
-      if (!panel) return;
-      panel.replaceChildren();
-      panel.appendChild(buildInfoItem('Name', info.name));
-      panel.appendChild(buildInfoItem('Status', info.idle ? 'idle' : info.status));
-      panel.appendChild(buildInfoItem('Provider', info.provider));
-      panel.appendChild(buildInfoItem('IP', info.ip));
-      panel.appendChild(buildInfoItem('Model', info.model));
-      panel.appendChild(buildInfoItem('VM Type', info.vm_type));
-      panel.appendChild(buildInfoItem('SKU', info.instance_type));
-      panel.appendChild(buildInfoItem('Tmux', info.tmux_alive ? 'alive' : 'dead'));
-      panel.appendChild(buildInfoItem('Uptime', info.uptime));
-    } catch (e) {
-      var panel = $('#workerInfo');
-      if (panel && selectedWorker === name) panel.textContent = e.message;
-    }
+  // Update VM type SKUs hint - clear old values when provider changes
+  const vmType = $('#spawnVmType').value || 'regular';
+  if (pCfg.skus && pCfg.skus[vmType]) {
+    $('#spawnInstance').placeholder = pCfg.skus[vmType];
+  }
+}
+
+function populateProviderSelect() {
+  const providerSelect = $('#spawnProvider');
+  providerSelect.innerHTML = '';
+  if (!fleetConfig) {
+    providerSelect.innerHTML = '<option value="">unavailable</option>';
+    return;
   }
 
-  function connectLogs(name) {
-    if (logSource) { logSource.close(); logSource = null; }
-    const token = getToken();
-    const url = '/api/workers/' + encodeURIComponent(name) + '/logs' +
-      (token ? '?token=' + encodeURIComponent(token) : '');
-    logSource = new EventSource(url);
-
-    logSource.addEventListener('logs', function(e) {
-      var data = JSON.parse(e.data);
-      var panel = $('#logOutput');
-      if (panel) {
-        panel.textContent = data.content;
-        panel.scrollTop = panel.scrollHeight;
-      }
-    });
-
-    logSource.addEventListener('status', function(e) {
-      var data = JSON.parse(e.data);
-      if (data.idle) {
-        var statusItem = document.querySelector('#workerInfo .info-item[data-field="status"]');
-        if (statusItem) {
-          var val = statusItem.querySelector('.value');
-          if (val) val.textContent = 'idle';
-        }
-      }
-    });
-
-    logSource.addEventListener('error', function() {
-      var panel = $('#logOutput');
-      if (panel && panel.textContent === 'Connecting...') {
-        panel.textContent = 'Connection failed. Retrying...';
-      }
-    });
-  }
-
-  // --- Actions ---
-
-  async function sendPrompt() {
-    var input = $('#promptInput');
-    if (!input) return;
-    var prompt = input.value.trim();
-    if (!prompt || !selectedWorker) return;
-
-    input.value = '';
-    try {
-      await api('/workers/' + selectedWorker + '/ask', {
-        method: 'POST',
-        body: { prompt: prompt },
-      });
-    } catch (e) {
-      alert('Failed to send prompt: ' + e.message);
-    }
-  }
-
-  async function killWorker() {
-    if (!selectedWorker) return;
-    if (!confirm('Destroy worker "' + selectedWorker + '"?')) return;
-
-    try {
-      await api('/workers/' + selectedWorker, { method: 'DELETE' });
-      if (logSource) { logSource.close(); logSource = null; }
-      selectedWorker = null;
-      var detail = $('#detailPanel');
-      detail.replaceChildren();
-      detail.appendChild(el('div', { className: 'detail-empty' }, 'Worker destroyed. Select another.'));
-      refreshWorkers();
-      refreshTasks();
-    } catch (e) {
-      alert('Failed to kill worker: ' + e.message);
-    }
-  }
-
-  // --- Spawn modal ---
-
-  $('#spawnBtn').addEventListener('click', function() {
-    $('#spawnModal').classList.add('open');
-    $('#spawnName').focus();
+  const current = fleetConfig.provider || 'devcontainer';
+  const providers = Object.keys(fleetConfig.providers);
+  providers.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = p + (p === current ? ' (default)' : '');
+    if (p === current) opt.selected = true;
+    providerSelect.appendChild(opt);
   });
+}
 
-  $('#spawnCancelBtn').addEventListener('click', function() {
+$('#spawnBtn').onclick = async () => {
+  $('#spawnModal').classList.add('open');
+  if (!fleetConfig) await loadConfig();
+  populateProviderSelect();
+  updateSpawnDefaults();
+  $('#spawnName').focus();
+};
+
+$('#spawnProvider').addEventListener('change', updateSpawnDefaults);
+$('#spawnVmType').addEventListener('change', () => {
+  if (!fleetConfig) return;
+  const provider = $('#spawnProvider').value;
+  const pCfg = fleetConfig.providers[provider];
+  if (!pCfg) return;
+  const vmType = $('#spawnVmType').value || 'regular';
+  if (pCfg.skus && pCfg.skus[vmType]) {
+    $('#spawnInstance').placeholder = pCfg.skus[vmType];
+  } else {
+    $('#spawnInstance').placeholder = pCfg.instance_type || '';
+  }
+});
+
+$('#spawnCancel').onclick = () => $('#spawnModal').classList.remove('open');
+$('#spawnModal').onclick = e => { if (e.target === $('#spawnModal')) $('#spawnModal').classList.remove('open'); };
+document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#spawnModal').classList.remove('open'); });
+
+$('#spawnConfirm').onclick = async () => {
+  const name = $('#spawnName').value.trim();
+  if (!name) { toast('Name is required', true); return; }
+  const body = { name };
+  const provider = $('#spawnProvider').value;
+  const vmType = $('#spawnVmType').value;
+  const model = $('#spawnModel').value.trim();
+  const instance = $('#spawnInstance').value.trim();
+  const region = $('#spawnRegion').value.trim();
+  if (provider) body.provider = provider;
+  if (vmType) body.vm_type = vmType;
+  if (model) body.model = model;
+  if (instance) body.instance_type = instance;
+  if (region) body.region = region;
+  try {
+    await api('/workers', { method: 'POST', body });
     $('#spawnModal').classList.remove('open');
-  });
+    $('#spawnName').value = '';
+    $('#spawnModel').value = '';
+    $('#spawnInstance').value = '';
+    $('#spawnRegion').value = '';
+    toast('Spawning ' + name);
+    refreshWorkers();
+    refreshTasks();
+  } catch(e) { toast('Failed: ' + e.message, true); }
+};
 
-  $('#spawnConfirmBtn').addEventListener('click', async function() {
-    var name = $('#spawnName').value.trim();
-    if (!name) { alert('Name is required'); return; }
-
-    var body = { name: name };
-    var vmType = $('#spawnVmType').value;
-    var model = $('#spawnModel').value.trim();
-    var instance = $('#spawnInstance').value.trim();
-    if (vmType) body.vm_type = vmType;
-    if (model) body.model = model;
-    if (instance) body.instance_type = instance;
-
-    try {
-      await api('/workers', { method: 'POST', body: body });
-      $('#spawnModal').classList.remove('open');
-      $('#spawnName').value = '';
-      refreshWorkers();
-      refreshTasks();
-    } catch (e) {
-      alert('Failed to spawn: ' + e.message);
+// ── Fleet Cost (periodic) ─────────────────────────────────
+async function refreshFleetCost() {
+  try {
+    const usage = await api('/fleet/usage');
+    const count = usage.worker_count || 0;
+    const cost = usage.total_cost_usd || 0;
+    // Store per-worker costs
+    if (usage.workers) {
+      for (const [name, wUsage] of Object.entries(usage.workers)) {
+        workerCosts[name] = wUsage.total_cost_usd || 0;
+      }
+      renderWorkerList();
     }
-  });
+    if (count > 0) {
+      $('#fleetCost').innerHTML = `<b>${count}</b> worker${count!==1?'s':''} &middot; <b>$${cost.toFixed(2)}</b>`;
+      $('#sidebarFooter').innerHTML = `<b>${count}</b> worker${count!==1?'s':''} &middot; fleet total <b>$${cost.toFixed(4)}</b>`;
+    }
+  } catch(e) {}
+}
 
-  // --- Polling ---
-  // Workers: state.json only changes on spawn/kill, so 15s is fine.
-  // Tasks: 3s while tasks are running, 30s when idle.
+// ── Init ──────────────────────────────────────────────────
+loadConfig(); // pre-fetch config for spawn modal
+refreshWorkers();
+refreshTasks();
+refreshFleetCost();
+setInterval(refreshWorkers, 10000);
 
-  var hasActiveTasks = false;
+let hasActiveTasks = false;
+(function pollTasks() {
+  setTimeout(async () => {
+    hasActiveTasks = await refreshTasks();
+    if (hasActiveTasks) refreshWorkers(); // refresh worker list faster when tasks running
+    pollTasks();
+  }, hasActiveTasks ? 3000 : 20000);
+})();
 
-  var _origRefreshTasks = refreshTasks;
-  refreshTasks = async function() {
-    await _origRefreshTasks();
-    try {
-      var tasks = await api('/tasks');
-      hasActiveTasks = tasks.some(function(t) { return t.status === 'running'; });
-    } catch (e) {}
-  };
+// Refresh fleet cost less frequently
+setInterval(refreshFleetCost, 30000);
 
-  refreshWorkers();
-  refreshTasks();
-  setInterval(refreshWorkers, 15000);
+// Also refresh selected worker detail periodically
+setInterval(() => { if (selected) fetchWorkerDetail(selected); }, 5000);
 
-  (function pollTasks() {
-    setTimeout(function() {
-      refreshTasks().then(pollTasks);
-    }, hasActiveTasks ? 3000 : 30000);
-  })();
 })();
 </script>
 </body>

@@ -18,6 +18,8 @@ dependencies = [
     "fastapi",
     "uvicorn[standard]",
     "sse-starlette",
+    "claude-code-sdk",
+    "httpx",
 ]
 
 [project.scripts]

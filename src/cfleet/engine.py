@@ -1,4 +1,4 @@
-"""Core orchestration engine — ties infra, provisioner, and SSH together."""
+"""Core orchestration engine — ties infra, provisioner, relay, and SSH together."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 from rich.console import Console
 
 from cfleet.config import CLOUD_PROVIDERS, DEFAULT_SKUS, PROVIDER_DEFAULTS, FleetConfig, FleetState, VMType, WorkerState
+from cfleet.relay_client import RelayClient, format_message
 
 console = Console()
 
@@ -34,14 +35,27 @@ class FleetEngine:
         """Return a WorkerSSH or WorkerDocker connection based on provider."""
         if worker.provider == "devcontainer":
             from cfleet.devcontainer import WorkerDocker
-            return WorkerDocker(container_id=worker.container_id)
+            return WorkerDocker(
+                container_id=worker.container_id,
+                relay_port=worker.relay_port,
+            )
         from cfleet.ssh import WorkerSSH
         user = worker.ssh_user or self.config.resolve_ssh_user(provider=worker.provider)
         return WorkerSSH(
             ip=worker.ip,
             user=user,
             key_path=str(self.config.resolve_ssh_key()),
+            relay_port=worker.relay_port,
         )
+
+    def _get_relay(self, worker: WorkerState) -> RelayClient:
+        """Return a RelayClient for a worker."""
+        conn = self._get_conn(worker)
+        return conn.get_relay_client()
+
+    def _uses_relay(self, worker: WorkerState) -> bool:
+        """Check if a worker uses the Agent SDK relay (vs. legacy tmux)."""
+        return worker.communication_mode == "relay"
 
     # ------------------------------------------------------------------
     # init
@@ -179,6 +193,8 @@ class FleetEngine:
             ssh_user="vscode",
             model=model,
             repos=repo_names,
+            communication_mode="relay",
+            relay_port=self.config.worker_relay_port,
         )
         self.state.add_worker(worker)
         self._save_state()
@@ -236,6 +252,8 @@ class FleetEngine:
             ssh_user=effective_ssh_user,
             model=model,
             repos=repo_names,
+            communication_mode="relay",
+            relay_port=self.config.worker_relay_port,
         )
         self.state.add_worker(worker)
         self._save_state()
@@ -341,9 +359,14 @@ class FleetEngine:
     def ask(self, name: str, prompt: str) -> None:
         """Send a prompt to a worker. Fire and forget."""
         worker = self.state.get_worker(name)
-        conn = self._get_conn(worker)
-        conn.send_prompt(prompt)
-        conn.close()
+
+        if self._uses_relay(worker):
+            relay = self._get_relay(worker)
+            relay.send_prompt_sync(prompt)
+        else:
+            conn = self._get_conn(worker)
+            conn.send_prompt(prompt)
+            conn.close()
 
         worker.last_prompt = prompt
         worker.last_prompt_at = datetime.now(timezone.utc).isoformat()
@@ -352,11 +375,27 @@ class FleetEngine:
         console.print(f"Prompt sent to [bold]{name}[/bold].")
 
     # ------------------------------------------------------------------
+    # interrupt
+    # ------------------------------------------------------------------
+
+    def interrupt(self, name: str) -> None:
+        """Interrupt the current agent run on a worker."""
+        worker = self.state.get_worker(name)
+        if not self._uses_relay(worker):
+            console.print("[yellow]Interrupt is only supported for relay workers.[/yellow]")
+            return
+        relay = self._get_relay(worker)
+        relay.interrupt_sync()
+        worker.status = "idle"
+        self._save_state()
+        console.print(f"Interrupted [bold]{name}[/bold].")
+
+    # ------------------------------------------------------------------
     # attach
     # ------------------------------------------------------------------
 
     def attach(self, name: str) -> None:
-        """Attach to a worker's tmux session. Replaces current process."""
+        """Attach to a worker's shell. Replaces current process."""
         worker = self.state.get_worker(name)
         conn = self._get_conn(worker)
         conn.attach()  # Does not return — replaces process
@@ -386,21 +425,42 @@ class FleetEngine:
     # ------------------------------------------------------------------
 
     def logs(self, name: str, lines: int = 100, follow: bool = False) -> None:
-        """Print worker tmux logs."""
+        """Print worker logs — structured messages from relay, or raw tmux output."""
         worker = self.state.get_worker(name)
-        conn = self._get_conn(worker)
 
-        if follow:
-            try:
-                for line in conn.stream_logs():
-                    console.print(line)
-            except KeyboardInterrupt:
-                pass
+        if self._uses_relay(worker):
+            relay = self._get_relay(worker)
+            if follow:
+                try:
+                    import asyncio
+                    asyncio.run(self._stream_relay_logs(relay))
+                except KeyboardInterrupt:
+                    pass
+            else:
+                result = relay.get_messages_sync(limit=lines)
+                for msg in result.get("messages", []):
+                    formatted = format_message(msg)
+                    if formatted.strip():
+                        console.print(formatted, markup=True)
         else:
-            output = conn.read_logs(lines=lines)
-            console.print(output)
+            conn = self._get_conn(worker)
+            if follow:
+                try:
+                    for line in conn.stream_logs():
+                        console.print(line)
+                except KeyboardInterrupt:
+                    pass
+            else:
+                output = conn.read_logs(lines=lines)
+                console.print(output)
+            conn.close()
 
-        conn.close()
+    async def _stream_relay_logs(self, relay: RelayClient) -> None:
+        """Stream structured messages from a relay."""
+        async for msg in relay.stream_messages():
+            formatted = format_message(msg)
+            if formatted.strip():
+                console.print(formatted, markup=True)
 
     # ------------------------------------------------------------------
     # status
@@ -412,21 +472,58 @@ class FleetEngine:
         info = worker.model_dump()
 
         reachable = (worker.ip or worker.container_id) and worker.status not in ("stopped", "spawning")
-        if reachable:
-            try:
-                conn = self._get_conn(worker)
-                info["tmux_alive"] = conn.is_alive()
-                stdout, _, _ = conn.exec("uptime -p")
-                info["uptime"] = stdout.strip()
-                conn.close()
-            except Exception:
-                info["tmux_alive"] = False
-                info["uptime"] = "unknown"
-        else:
+        if not reachable:
+            info["relay_alive"] = False
             info["tmux_alive"] = False
             info["uptime"] = "N/A"
+            info["idle"] = False
+            return info
+
+        try:
+            conn = self._get_conn(worker)
+            stdout, _, _ = conn.exec("uptime -p")
+            info["uptime"] = stdout.strip()
+
+            if self._uses_relay(worker):
+                relay = conn.get_relay_client()
+                alive = relay.health_check()
+                info["relay_alive"] = alive
+                info["tmux_alive"] = False
+                if alive:
+                    relay_status = relay.get_status_sync()
+                    info["idle"] = relay_status.get("status") == "idle"
+                    info["session_id"] = relay_status.get("session_id")
+                    info["total_input_tokens"] = relay_status.get("total_input_tokens", 0)
+                    info["total_output_tokens"] = relay_status.get("total_output_tokens", 0)
+                    info["total_cost_usd"] = relay_status.get("total_cost_usd", 0.0)
+                    info["message_count"] = relay_status.get("message_count", 0)
+                else:
+                    info["idle"] = False
+            else:
+                info["relay_alive"] = False
+                info["tmux_alive"] = conn.is_alive()
+                info["idle"] = conn.is_claude_idle() if info["tmux_alive"] else False
+
+            conn.close()
+        except Exception:
+            info["relay_alive"] = False
+            info["tmux_alive"] = False
+            info["uptime"] = "unknown"
+            info["idle"] = False
 
         return info
+
+    # ------------------------------------------------------------------
+    # messages (relay-only)
+    # ------------------------------------------------------------------
+
+    def messages(self, name: str, offset: int = 0, limit: int = 200) -> dict:
+        """Get structured conversation history from a relay worker."""
+        worker = self.state.get_worker(name)
+        if not self._uses_relay(worker):
+            return {"messages": [], "total": 0, "offset": 0}
+        relay = self._get_relay(worker)
+        return relay.get_messages_sync(offset=offset, limit=limit)
 
     # ------------------------------------------------------------------
     # ls (data only — formatting is in CLI)

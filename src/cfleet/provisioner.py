@@ -30,6 +30,9 @@ def bootstrap_worker(
     ssh_key = str(fleet_config.resolve_ssh_key())
     ssh_user = fleet_config.resolve_ssh_user()
 
+    # The relay script lives alongside our Python modules
+    relay_source_dir = str(Path(__file__).parent)
+
     extravars = {
         "target_host": "all",
         "ansible_user": ssh_user,
@@ -40,6 +43,8 @@ def bootstrap_worker(
         "repos": repos,
         "workspace_dir": "/workspace",
         "anthropic_api_key": fleet_config.anthropic_api_key,
+        "relay_source_dir": relay_source_dir,
+        "relay_port": fleet_config.worker_relay_port,
     }
 
     # Optional paths — only pass if they exist

@@ -72,7 +72,7 @@ class SpawnDialog(ModalScreen[dict | None]):
             yield Label("VM type (blank = regular):")
             yield Input(id="spawn-vmtype", placeholder="regular | snp | tdx")
             yield Label("Model (blank = default):")
-            yield Input(id="spawn-model", placeholder="claude-sonnet-4-5-20250514")
+            yield Input(id="spawn-model", placeholder="claude-opus-4-6")
             yield Label("Instance type (blank = auto):")
             yield Input(id="spawn-instance", placeholder="auto from provider + vm type")
             yield Label("[Enter] spawn  [Escape] cancel")
@@ -255,6 +255,7 @@ class FleetTUI(App):
         Binding("s", "spawn", "Spawn", show=True),
         Binding("k", "kill_worker", "Kill", show=True),
         Binding("a", "attach_worker", "Attach", show=True),
+        Binding("i", "interrupt_worker", "Interrupt", show=True),
         Binding("f", "send_files", "Send", show=True),
         Binding("c", "collect_files", "Collect", show=True),
         Binding("q", "quit", "Quit", show=True),
@@ -367,14 +368,19 @@ class FleetTUI(App):
             truncated = worker.last_prompt[:60] + "..." if len(worker.last_prompt) > 60 else worker.last_prompt
             prompt_display = f"\n  Last: \"{truncated}\""
 
+        target = worker.ip or (worker.container_id[:12] if worker.container_id else "—")
+        tokens = ""
+        if worker.total_input_tokens or worker.total_output_tokens:
+            tokens = f"\n  Tokens: {worker.total_input_tokens:,} in / {worker.total_output_tokens:,} out  ${worker.total_cost_usd:.4f}"
+
         detail = (
             f"[bold]{worker.name}[/bold]\n"
-            f"  Provider: {worker.provider}\n"
-            f"  VM Type:  {worker.vm_type}  SKU: {worker.instance_type}\n"
-            f"  IP:       {worker.ip or '—'}\n"
+            f"  Provider: {worker.provider}  Mode: {worker.communication_mode}\n"
+            f"  Target:   {target}\n"
             f"  Model:    {worker.model}\n"
             f"  Repos:    {', '.join(worker.repos) if worker.repos else '—'}\n"
             f"  Status:   {worker.status}"
+            f"{tokens}"
             f"{prompt_display}"
         )
         self.query_one("#worker-detail", Static).update(detail)
@@ -385,9 +391,10 @@ class FleetTUI(App):
 
     @work(exclusive=True, group="log_stream")
     async def _start_log_stream(self, name: str) -> None:
-        """Stream tmux logs for the selected worker. Polls every 3 seconds.
+        """Stream logs for the selected worker.
 
-        Uses Static.update() with rich Text for atomic, flash-free updates.
+        Relay workers: fetches structured messages and renders them.
+        Legacy workers: polls tmux scrollback.
         """
         log_widget = self.query_one("#log-content", Static)
         log_scroll = self.query_one("#log-panel", VerticalScroll)
@@ -400,9 +407,56 @@ class FleetTUI(App):
 
         from cfleet.engine import FleetEngine
         engine = FleetEngine(config=self._config)
-        conn = engine._get_conn(worker)
 
+        if worker.communication_mode == "relay":
+            await self._stream_relay_logs(name, engine, log_widget, log_scroll)
+        else:
+            await self._stream_tmux_logs(name, engine, log_widget, log_scroll)
+
+    async def _stream_relay_logs(self, name, engine, log_widget, log_scroll):
+        """Stream structured messages from a relay worker."""
+        from cfleet.relay_client import format_message
+
+        worker = engine.state.get_worker(name)
+        seen_count = 0
+
+        while self._selected_worker == name:
+            try:
+                relay = engine._get_relay(worker)
+                result = await asyncio.to_thread(
+                    relay.get_messages_sync, 0, 200
+                )
+                messages = result.get("messages", [])
+                if len(messages) != seen_count:
+                    seen_count = len(messages)
+                    parts = []
+                    for msg in messages:
+                        formatted = format_message(msg)
+                        if formatted.strip():
+                            parts.append(formatted)
+                    log_widget.update("\n".join(parts))
+                    log_scroll.scroll_end(animate=False)
+
+                # Update worker status from relay
+                self._state = FleetState.load()
+                w = self._state.workers.get(name)
+                if w and w.status == "working":
+                    is_idle = await asyncio.to_thread(relay.is_idle)
+                    if is_idle:
+                        w.status = "idle"
+                        self._state.save()
+                        self._worker_snapshot = None
+                        self._refresh_workers()
+            except Exception as e:
+                log_widget.update(f"[red]Relay error: {e}[/red]")
+            await asyncio.sleep(2.0)
+
+    async def _stream_tmux_logs(self, name, engine, log_widget, log_scroll):
+        """Poll tmux scrollback for legacy workers."""
+        worker = engine.state.get_worker(name)
+        conn = engine._get_conn(worker)
         seen_content = ""
+
         while self._selected_worker == name:
             try:
                 output = await asyncio.to_thread(conn.read_logs, 80)
@@ -509,8 +563,28 @@ class FleetTUI(App):
         except Exception as e:
             self.call_from_thread(self.notify, f"Kill failed: {e}", severity="error")
 
+    def action_interrupt_worker(self) -> None:
+        """Interrupt the current agent run on the selected worker."""
+        name = self._get_selected_worker_name()
+        if not name:
+            self.notify("No worker selected", severity="warning")
+            return
+        self._do_interrupt(name)
+
+    @work(thread=True)
+    def _do_interrupt(self, name: str) -> None:
+        from cfleet.engine import FleetEngine
+
+        try:
+            engine = FleetEngine(config=self._config)
+            engine.interrupt(name)
+            self.call_from_thread(self.notify, f"Interrupted {name}")
+            self.call_from_thread(self._refresh_workers)
+        except Exception as e:
+            self.call_from_thread(self.notify, f"Interrupt failed: {e}", severity="error")
+
     def action_attach_worker(self) -> None:
-        """Attach to the selected worker's tmux session."""
+        """Attach to the selected worker's shell."""
         name = self._get_selected_worker_name()
         if not name:
             self.notify("No worker selected", severity="warning")
@@ -527,7 +601,7 @@ class FleetTUI(App):
                 subprocess.run([
                     "docker", "exec", "-it", "-u", "vscode",
                     worker.container_id,
-                    "tmux", "attach", "-t", "claude",
+                    "bash", "-l",
                 ])
             else:
                 ssh_key = str(self._config.resolve_ssh_key()) if self._config else "~/.ssh/id_ed25519"
@@ -537,7 +611,7 @@ class FleetTUI(App):
                     "-i", ssh_key,
                     "-o", "StrictHostKeyChecking=no",
                     f"{ssh_user}@{worker.ip}",
-                    "tmux", "attach", "-t", "claude",
+                    "bash", "-l",
                 ])
 
     def action_send_files(self) -> None:
