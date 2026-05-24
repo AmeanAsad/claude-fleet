@@ -124,3 +124,22 @@ def rsync_from(
          f"{local_path}/"],
         check=True,
     )
+
+
+def ssh_attach(
+    ip: str,
+    user: str,
+    key_path: str,
+    command: str = "bash -l",
+) -> None:
+    """Replace current process with an interactive SSH session."""
+    key = str(Path(key_path).expanduser())
+    env = os.environ.copy()
+    env["TERM"] = "xterm-256color"
+    os.execve(
+        "/usr/bin/ssh",
+        ["ssh", "-t", "-i", key,
+         "-o", "StrictHostKeyChecking=no",
+         f"{user}@{ip}", command],
+        env,
+    )
