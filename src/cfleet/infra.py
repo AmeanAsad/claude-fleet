@@ -35,7 +35,7 @@ class CloudProvider(ABC):
         """Return list of (plugin_name, version) required by this provider."""
 
     @abstractmethod
-    def get_worker_stack_config(self, fleet_config: FleetConfig) -> tuple[str, dict]:
+    def get_machine_stack_config(self, fleet_config: FleetConfig) -> tuple[str, dict]:
         """Return (config_key, config_dict) for the Pulumi stack."""
 
 
@@ -52,7 +52,7 @@ class AzureProvider(CloudProvider):
     def get_required_plugins(self) -> list[tuple[str, str]]:
         return []
 
-    def get_worker_stack_config(self, fleet_config: FleetConfig) -> tuple[str, dict]:
+    def get_machine_stack_config(self, fleet_config: FleetConfig) -> tuple[str, dict]:
         azure = fleet_config.cloud.azure
         cfg = {
             "subscription_id": azure.subscription_id,
@@ -80,7 +80,7 @@ class GcpProvider(CloudProvider):
     def get_required_plugins(self) -> list[tuple[str, str]]:
         return []
 
-    def get_worker_stack_config(self, fleet_config: FleetConfig) -> tuple[str, dict]:
+    def get_machine_stack_config(self, fleet_config: FleetConfig) -> tuple[str, dict]:
         gcp = fleet_config.cloud.gcp
         cfg = {
             "project_id": gcp.project_id,
@@ -173,37 +173,36 @@ class InfraManager:
         """Initialize the Pulumi stack (creates if needed)."""
         self._get_stack()
 
-    def _workers_from_state(self, exclude: str | None = None) -> dict:
-        """Build the Pulumi workers map from fleet state (the source of truth).
+    def _machines_from_state(self, exclude: str | None = None) -> dict:
+        """Build the Pulumi machines map from fleet state (the source of truth).
 
         Pulumi inline workspaces use temp dirs, so set_config doesn't persist
         between invocations. We always rebuild from fleet state instead.
         """
         state = FleetState.load()
-        workers = {}
-        for wname, w in state.workers.items():
-            if wname == exclude:
+        machines = {}
+        for mname, m in state.machines.items():
+            if mname == exclude:
                 continue
-            if w.provider not in CLOUD_PROVIDERS:
-                continue  # Devcontainer workers are not managed by Pulumi
-            if w.ip:  # Only include workers that Pulumi actually created
-                workers[wname] = {
-                    "instance_type": w.instance_type,
-                    "vm_type": w.vm_type,
-                    "provider": w.provider,
+            if m.provider not in CLOUD_PROVIDERS:
+                continue
+            if m.ip:
+                machines[mname] = {
+                    "instance_type": m.instance_type,
+                    "vm_type": m.vm_type,
+                    "provider": m.provider,
                 }
-        return workers
+        return machines
 
-    def _apply_config(self, stack: auto.Stack, workers: dict) -> None:
+    def _apply_config(self, stack: auto.Stack, machines: dict) -> None:
         """Set all Pulumi config from fleet state before every up."""
         stack.set_config(
-            "claude-fleet:workers", auto.ConfigValue(value=json.dumps(workers))
+            "claude-fleet:machines", auto.ConfigValue(value=json.dumps(machines))
         )
-        # Set provider configs for all providers in use
-        used_providers = {w.get("provider", self.config.cloud.provider) for w in workers.values()}
+        used_providers = {m.get("provider", self.config.cloud.provider) for m in machines.values()}
         for provider_name in used_providers:
             provider = get_provider(provider_name)
-            config_key, provider_cfg = provider.get_worker_stack_config(self.config)
+            config_key, provider_cfg = provider.get_machine_stack_config(self.config)
             stack.set_config(
                 config_key, auto.ConfigValue(value=json.dumps(provider_cfg))
             )
@@ -233,13 +232,13 @@ class InfraManager:
                 except OSError:
                     pass
 
-    def add_worker(self, name: str, worker_cfg: dict, provider: str | None = None) -> dict:
-        """Add a worker to the Pulumi config and run up. Returns outputs."""
+    def add_machine(self, name: str, machine_cfg: dict) -> dict:
+        """Add a machine to the Pulumi config and run up. Returns outputs."""
         stack = self._get_stack()
-        workers = self._workers_from_state()
-        workers[name] = worker_cfg
+        machines = self._machines_from_state()
+        machines[name] = machine_cfg
 
-        self._apply_config(stack, workers)
+        self._apply_config(stack, machines)
 
         def _up():
             stack.refresh(on_output=lambda msg: None)
@@ -248,12 +247,12 @@ class InfraManager:
 
         return self._run_with_timeout(_up)
 
-    def remove_worker(self, name: str) -> None:
-        """Remove a worker from the Pulumi config and run up to destroy it."""
+    def remove_machine(self, name: str) -> None:
+        """Remove a machine from the Pulumi config and run up to destroy it."""
         stack = self._get_stack()
-        workers = self._workers_from_state(exclude=name)
+        machines = self._machines_from_state(exclude=name)
 
-        self._apply_config(stack, workers)
+        self._apply_config(stack, machines)
 
         def _up():
             stack.refresh(on_output=lambda msg: None)
