@@ -7,19 +7,19 @@ dependencies = [
     "typer",
     "rich",
     "textual",
-    "paramiko",
     "pyyaml",
     "pydantic",
     "pulumi",
     "pulumi-azure-native",
     "pulumi-gcp",
-    "ansible-runner",
     "watchfiles",
     "fastapi",
     "uvicorn[standard]",
     "sse-starlette",
     "claude-code-sdk",
     "httpx",
+    "websockets",
+    "PyJWT[crypto]",
 ]
 
 [project.scripts]
@@ -34,7 +34,6 @@ packages = ["src/cfleet"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/cfleet/infra_pulumi" = "cfleet/infra_pulumi"
-"src/cfleet/ansible" = "cfleet/ansible"
 "src/cfleet/defaults" = "cfleet/defaults"
 "src/cfleet/static" = "cfleet/static"
 "src/cfleet/devcontainer" = "cfleet/devcontainer"
