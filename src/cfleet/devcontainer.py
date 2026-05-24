@@ -1,19 +1,15 @@
 """Devcontainer provider — runs fleet workers in local Docker containers.
 
-Based on Trail of Bits' claude-code-devcontainer approach: an Ubuntu 24.04
-container with Claude Code pre-installed, tmux, and /workspace mounted.
-
-No Pulumi, no SSH, no Ansible. Everything goes through `docker exec`.
+Ubuntu 24.04 container with Claude Code pre-installed and /workspace mounted.
+No Pulumi, no SSH. Everything goes through `docker exec`.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import time
-from collections.abc import Iterator
 from pathlib import Path
 
 from rich.console import Console
@@ -85,11 +81,23 @@ def spawn_container(
     """Create and start a fleet worker container. Returns the container ID."""
     build_image()
 
+    server_url = ""
+    server_token = ""
+    if hasattr(fleet_config, "server"):
+        if fleet_config.server.url:
+            server_url = fleet_config.server.url
+        elif fleet_config.server.host and fleet_config.server.port:
+            server_url = f"http://{fleet_config.server.host}:{fleet_config.server.port}"
+        server_token = fleet_config.server.token
+
     # Env vars injected into the container
     env = {
         "ANTHROPIC_API_KEY": anthropic_api_key,
         "CLAUDE_CODE_API_KEY": anthropic_api_key,
         "CFLEET_MODEL": model,
+        "CFLEET_SERVER_URL": server_url,
+        "CFLEET_TOKEN": server_token,
+        "CFLEET_WORKER_NAME": name,
     }
 
     # Read additional secrets from secrets.env
@@ -222,11 +230,21 @@ def _provision_container(
     relay_src = Path(__file__).parent / "worker_relay.py"
     _docker_cp(container_id, str(relay_src), "/opt/cfleet-relay.py", owner=user)
 
-    # Start the worker relay (replaces tmux-based Claude Code startup)
+    # Start the worker relay (with server registration if configured)
+    server_args = ""
+    if fleet_config and hasattr(fleet_config, "server"):
+        srv_url = ""
+        if fleet_config.server.url:
+            srv_url = fleet_config.server.url
+        elif fleet_config.server.host and fleet_config.server.port:
+            srv_url = f"http://{fleet_config.server.host}:{fleet_config.server.port}"
+        if srv_url:
+            server_args = f"--server-url {srv_url} --token {fleet_config.server.token} --worker-name {name}"
     _exec(
         f"nohup python3 /opt/cfleet-relay.py "
         f"--port {RELAY_PORT} --host 0.0.0.0 "
         f"--model {model} --cwd /workspace "
+        f"{server_args} "
         f"> /tmp/cfleet-relay.log 2>&1 &"
     )
 
@@ -266,17 +284,12 @@ def get_container_id(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# WorkerDocker — same interface as WorkerSSH for engine interop
+# WorkerDocker — Docker exec connection for engine interop
 # ---------------------------------------------------------------------------
 
 
 class WorkerDocker:
-    """Docker exec connection to a fleet worker container.
-
-    Mirrors the WorkerSSH interface so the engine can use either transparently.
-    Provides relay access for structured communication and legacy tmux methods
-    for backward compatibility.
-    """
+    """Docker exec connection to a fleet worker container."""
 
     def __init__(self, container_id: str, user: str = "vscode", relay_port: int = RELAY_PORT):
         self.container_id = container_id
@@ -334,57 +347,6 @@ class WorkerDocker:
             # Fallback: use docker exec to proxy (less efficient)
             ip = "127.0.0.1"
         return RelayClient(f"http://{ip}:{self.relay_port}")
-
-    # ------------------------------------------------------------------
-    # Legacy tmux methods (kept for migration from tmux-based workers)
-    # ------------------------------------------------------------------
-
-    def send_prompt(self, text: str) -> None:
-        """Inject text into the tmux claude session (legacy)."""
-        self.exec("tmux send-keys -t claude:code Escape")
-        time.sleep(0.5)
-        escaped = text.replace("'", "'\\''")
-        self.exec(f"tmux send-keys -t claude:code -l '{escaped}'")
-        self.exec("tmux send-keys -t claude:code Enter")
-
-    def read_logs(self, lines: int = 100) -> str:
-        """Capture recent tmux scrollback (legacy)."""
-        stdout, _, _ = self.exec(f"tmux capture-pane -t claude:code -p -S -{lines}")
-        return stdout
-
-    def stream_logs(self, interval: float = 2.0) -> Iterator[str]:
-        """Tail tmux output (legacy)."""
-        prev_output = ""
-        while True:
-            try:
-                output = self.read_logs(lines=200)
-                if output != prev_output:
-                    prev_lines = prev_output.splitlines()
-                    curr_lines = output.splitlines()
-                    overlap = 0
-                    if prev_lines:
-                        for i in range(len(curr_lines)):
-                            if curr_lines[i:i + len(prev_lines)] == prev_lines:
-                                overlap = i + len(prev_lines)
-                                break
-                    new_lines = curr_lines[overlap:]
-                    for line in new_lines:
-                        yield line
-                    prev_output = output
-            except Exception:
-                yield "[connection lost, retrying...]"
-            time.sleep(interval)
-
-    def is_claude_idle(self) -> bool:
-        """Check idle via tmux (legacy)."""
-        stdout, _, _ = self.exec("tmux capture-pane -t claude:code -p -S -5")
-        lines = [l.strip() for l in stdout.splitlines() if l.strip()]
-        return any(l == "\u276f" or l.startswith("\u276f ") for l in lines)
-
-    def is_alive(self) -> bool:
-        """Check if tmux session exists (legacy)."""
-        _, _, exit_code = self.exec("tmux has-session -t claude 2>/dev/null")
-        return exit_code == 0
 
     def attach(self) -> None:
         """Attach to the container with a bash shell for debugging."""
