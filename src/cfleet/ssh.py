@@ -85,3 +85,42 @@ def wait_for_ssh(
             return
         time.sleep(interval)
     raise TimeoutError(f"SSH not available on {ip} after {timeout}s")
+
+
+def rsync_to(
+    ip: str,
+    user: str,
+    key_path: str,
+    local_path: str,
+    remote_path: str,
+) -> None:
+    """rsync local files to remote."""
+    key = str(Path(key_path).expanduser())
+    ssh_cmd = f"ssh -i {key} {' '.join(SSH_OPTS)} {' '.join(_control_path(ip))}"
+    subprocess.run(
+        ["rsync", "-avz", "--filter=:- .gitignore",
+         "-e", ssh_cmd,
+         local_path.rstrip("/"),
+         f"{user}@{ip}:{remote_path}/"],
+        check=True,
+    )
+
+
+def rsync_from(
+    ip: str,
+    user: str,
+    key_path: str,
+    remote_path: str,
+    local_path: str,
+) -> None:
+    """rsync remote files to local."""
+    key = str(Path(key_path).expanduser())
+    Path(local_path).mkdir(parents=True, exist_ok=True)
+    ssh_cmd = f"ssh -i {key} {' '.join(SSH_OPTS)} {' '.join(_control_path(ip))}"
+    subprocess.run(
+        ["rsync", "-avz", "--filter=:- .gitignore",
+         "-e", ssh_cmd,
+         f"{user}@{ip}:{remote_path}/",
+         f"{local_path}/"],
+        check=True,
+    )
