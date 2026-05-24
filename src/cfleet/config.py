@@ -109,10 +109,12 @@ class CloudConfig(BaseModel):
     gcp: GcpConfig = GcpConfig()
 
 
-class ApiConfig(BaseModel):
+class ServerConfig(BaseModel):
+    """Central server config — used by both server and clients."""
+    url: str = ""  # e.g. http://my-server:8420 — set via `cfleet connect`
     host: str = "0.0.0.0"
     port: int = 8420
-    token: str = ""  # empty = no auth
+    token: str = ""  # bearer token for API + worker registration
 
 
 class PulumiConfig(BaseModel):
@@ -132,7 +134,7 @@ class FleetConfig(BaseModel):
     worker_relay_port: int = 8421
     pulumi: PulumiConfig = PulumiConfig()
     cloud: CloudConfig = CloudConfig()
-    api: ApiConfig = ApiConfig()
+    server: ServerConfig = ServerConfig()
 
     @classmethod
     def load(cls, path: Path | None = None) -> FleetConfig:
@@ -194,30 +196,36 @@ class FleetConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class MachineState(BaseModel):
+    name: str
+    provider: str = ""  # azure | gcp | devcontainer
+    ip: str = ""
+    region: str = ""
+    instance_type: str = ""
+    vm_type: str = "regular"  # regular | snp | tdx
+    ssh_user: str = ""
+    container_id: str = ""  # devcontainer only
+    status: str = "creating"  # creating | provisioning | ready | errored | stopped
+    worker_names: list[str] = Field(default_factory=list)
+    next_relay_port: int = 8421
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
 class WorkerState(BaseModel):
     name: str
-    status: str = "spawning"  # spawning | provisioning | idle | working | errored | stopped
-    ip: str = ""
-    provider: str = ""
-    vm_type: str = "regular"  # regular | snp | tdx
-    instance_type: str = ""
-    ssh_user: str = ""  # SSH user this worker was provisioned with
-    container_id: str = ""  # Docker container ID (devcontainer provider only)
+    machine_name: str = ""
+    relay_port: int = 8421
     model: str = ""
     repos: list[str] = Field(default_factory=list)
+    status: str = "spawning"  # spawning | provisioning | idle | working | errored | stopped
+    session_id: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_prompt: Optional[str] = None
     last_prompt_at: Optional[str] = None
-    # Agent SDK relay fields
-    communication_mode: str = "relay"  # "relay" (Agent SDK) | "tmux" (legacy)
-    session_id: Optional[str] = None
-    relay_port: int = 8421
-    total_input_tokens: int = 0
-    total_output_tokens: int = 0
-    total_cost_usd: float = 0.0
 
 
 class FleetState(BaseModel):
+    machines: dict[str, MachineState] = Field(default_factory=dict)
     workers: dict[str, WorkerState] = Field(default_factory=dict)
 
     @classmethod
@@ -233,6 +241,33 @@ class FleetState(BaseModel):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(self.model_dump(), indent=2) + "\n")
 
+    # -- Machine helpers -------------------------------------------------------
+
+    def get_machine(self, name: str) -> MachineState:
+        if name not in self.machines:
+            raise KeyError(f"Machine '{name}' not found. Run 'cfleet machine ls' to see machines.")
+        return self.machines[name]
+
+    def add_machine(self, machine: MachineState) -> None:
+        self.machines[machine.name] = machine
+
+    def remove_machine(self, name: str) -> None:
+        machine = self.machines.pop(name, None)
+        if machine:
+            for wname in list(machine.worker_names):
+                self.workers.pop(wname, None)
+
+    def allocate_relay_port(self, machine_name: str) -> int:
+        machine = self.get_machine(machine_name)
+        port = machine.next_relay_port
+        machine.next_relay_port = port + 1
+        return port
+
+    def get_workers_on_machine(self, machine_name: str) -> list[WorkerState]:
+        return [w for w in self.workers.values() if w.machine_name == machine_name]
+
+    # -- Worker helpers --------------------------------------------------------
+
     def get_worker(self, name: str) -> WorkerState:
         if name not in self.workers:
             raise KeyError(f"Worker '{name}' not found. Run 'cfleet ls' to see workers.")
@@ -240,6 +275,14 @@ class FleetState(BaseModel):
 
     def add_worker(self, worker: WorkerState) -> None:
         self.workers[worker.name] = worker
+        if worker.machine_name and worker.machine_name in self.machines:
+            machine = self.machines[worker.machine_name]
+            if worker.name not in machine.worker_names:
+                machine.worker_names.append(worker.name)
 
     def remove_worker(self, name: str) -> None:
-        self.workers.pop(name, None)
+        worker = self.workers.pop(name, None)
+        if worker and worker.machine_name in self.machines:
+            machine = self.machines[worker.machine_name]
+            if name in machine.worker_names:
+                machine.worker_names.remove(name)
