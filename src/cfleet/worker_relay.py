@@ -313,6 +313,174 @@ def create_relay_app(model: str = "", cwd: str = "/workspace") -> FastAPI:
     return app
 
 
+# ---------------------------------------------------------------------------
+# WebSocket client — connects to central server for command dispatch
+# ---------------------------------------------------------------------------
+
+
+async def _ws_client_loop(
+    server_url: str,
+    token: str,
+    worker_name: str,
+    machine_name: str,
+    model: str,
+    cwd: str,
+) -> None:
+    """Connect to the central server via WebSocket, receive commands, stream events."""
+    import websockets
+
+    ws_url = server_url.rstrip("/").replace("http://", "ws://").replace("https://", "wss://") + "/ws"
+    backoff = 1.0
+    max_backoff = 60.0
+
+    while True:
+        try:
+            async with websockets.connect(ws_url) as ws:
+                # Register
+                await ws.send(json.dumps({
+                    "type": "register",
+                    "token": token,
+                    "worker_name": worker_name,
+                    "machine_name": machine_name,
+                }))
+
+                reg_response = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if reg_response.get("type") != "registered":
+                    print(f"[ws] Registration failed: {reg_response}")
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, max_backoff)
+                    continue
+
+                print(f"[ws] Connected to server as {worker_name}")
+                backoff = 1.0
+
+                # Forward relay events to server
+                event_queue = state.subscribe()
+
+                async def _forward_events():
+                    try:
+                        while True:
+                            event = await event_queue.get()
+                            await ws.send(json.dumps({
+                                "type": "event",
+                                "data": _scrubber.scrub_dict(event),
+                            }))
+                    except Exception:
+                        pass
+                    finally:
+                        state.unsubscribe(event_queue)
+
+                forward_task = asyncio.create_task(_forward_events())
+
+                # Heartbeat task
+                async def _heartbeat():
+                    while True:
+                        await asyncio.sleep(30)
+                        try:
+                            await ws.send(json.dumps({"type": "heartbeat"}))
+                        except Exception:
+                            break
+
+                heartbeat_task = asyncio.create_task(_heartbeat())
+
+                # Listen for commands
+                try:
+                    async for raw in ws:
+                        data = json.loads(raw)
+                        cmd_type = data.get("type")
+                        request_id = data.get("request_id", "")
+
+                        if cmd_type == "ask":
+                            prompt = data.get("prompt", "")
+                            if state.status == "working":
+                                await ws.send(json.dumps({
+                                    "type": "response",
+                                    "request_id": request_id,
+                                    "data": {"error": "Agent is already working"},
+                                }))
+                            else:
+                                state._task = asyncio.create_task(_run_agent(prompt, model, cwd))
+                                await ws.send(json.dumps({
+                                    "type": "response",
+                                    "request_id": request_id,
+                                    "data": {"ok": True, "status": "working"},
+                                }))
+                                await ws.send(json.dumps({
+                                    "type": "status_update",
+                                    "status": "working",
+                                }))
+
+                                async def _notify_completion(task, _ws=ws):
+                                    try:
+                                        await task
+                                    except Exception:
+                                        pass
+                                    try:
+                                        await _ws.send(json.dumps({
+                                            "type": "status_update",
+                                            "status": state.status,
+                                        }))
+                                    except Exception:
+                                        pass
+
+                                asyncio.create_task(_notify_completion(state._task))
+
+                        elif cmd_type == "interrupt":
+                            if state._task and not state._task.done():
+                                state._task.cancel()
+                                await ws.send(json.dumps({
+                                    "type": "response",
+                                    "request_id": request_id,
+                                    "data": {"ok": True, "status": "interrupted"},
+                                }))
+                            else:
+                                await ws.send(json.dumps({
+                                    "type": "response",
+                                    "request_id": request_id,
+                                    "data": {"ok": True, "status": "not_running"},
+                                }))
+
+                        elif cmd_type == "status":
+                            await ws.send(json.dumps({
+                                "type": "response",
+                                "request_id": request_id,
+                                "data": {
+                                    "status": state.status,
+                                    "session_id": state.session_id,
+                                    "message_count": len(state.messages),
+                                    "total_input_tokens": state.total_input_tokens,
+                                    "total_output_tokens": state.total_output_tokens,
+                                    "total_cost_usd": state.total_cost_usd,
+                                },
+                            }))
+
+                        elif cmd_type == "messages":
+                            offset = data.get("offset", 0)
+                            limit = data.get("limit", 200)
+                            msgs = [_scrubber.scrub_dict(m) for m in state.messages[offset:offset + limit]]
+                            await ws.send(json.dumps({
+                                "type": "response",
+                                "request_id": request_id,
+                                "data": {
+                                    "messages": msgs,
+                                    "total": len(state.messages),
+                                    "offset": offset,
+                                },
+                            }))
+
+                        elif cmd_type == "heartbeat_ack":
+                            pass
+
+                finally:
+                    forward_task.cancel()
+                    heartbeat_task.cancel()
+
+        except Exception as e:
+            print(f"[ws] Connection error: {e}, reconnecting in {backoff:.0f}s...")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
+
+
 
 
 # ---------------------------------------------------------------------------
