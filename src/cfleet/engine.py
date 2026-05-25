@@ -550,6 +550,11 @@ class FleetEngine:
             from cfleet.devcontainer import WorkerDocker
             docker = WorkerDocker(container_id=machine.container_id, relay_port=worker.relay_port)
             docker.attach()
+        elif machine.provider == "external":
+            console.print(
+                f"[yellow]Machine '{machine.name}' is external (joined via 'cfleet join').[/yellow]\n"
+                f"[dim]Open a shell on that host directly; worker cwd is the path passed to 'cfleet agent --cwd'.[/dim]"
+            )
         else:
             from cfleet.ssh import ssh_attach
             ssh_user = machine.ssh_user or self.config.resolve_ssh_user(provider=machine.provider)
@@ -568,6 +573,12 @@ class FleetEngine:
             from cfleet.devcontainer import WorkerDocker
             docker = WorkerDocker(container_id=machine.container_id, relay_port=worker.relay_port)
             docker.send_files(local_path, remote_path)
+        elif machine.provider == "external":
+            console.print(
+                f"[yellow]send/collect not supported for external machines.[/yellow]\n"
+                f"[dim]Copy files directly to/from the agent's --cwd on host '{machine.name}'.[/dim]"
+            )
+            return
         else:
             from cfleet.ssh import rsync_to
             ssh_user = machine.ssh_user or self.config.resolve_ssh_user(provider=machine.provider)
@@ -584,6 +595,12 @@ class FleetEngine:
             from cfleet.devcontainer import WorkerDocker
             docker = WorkerDocker(container_id=machine.container_id, relay_port=worker.relay_port)
             docker.collect(remote_path, local_dest)
+        elif machine.provider == "external":
+            console.print(
+                f"[yellow]send/collect not supported for external machines.[/yellow]\n"
+                f"[dim]Copy files directly to/from the agent's --cwd on host '{machine.name}'.[/dim]"
+            )
+            return
         else:
             from cfleet.ssh import rsync_from
             ssh_user = machine.ssh_user or self.config.resolve_ssh_user(provider=machine.provider)
