@@ -658,9 +658,9 @@ def gh_setup():
         raise typer.Exit(1)
 
     console.print("\n[bold]GitHub App Setup[/bold]")
-    console.print("[dim]Create a GitHub App at: https://github.com/settings/apps/new")
-    console.print("Recommended permissions: contents (rw), pull_requests (w), issues (w), metadata (r)")
-    console.print("Install it on your repos, then provide the details below.[/dim]\n")
+    console.print("[dim]Create a GitHub App at: https://github.com/settings/apps/new[/dim]")
+    console.print("[dim]Recommended permissions: contents (rw), pull_requests (w), issues (w), metadata (r)[/dim]")
+    console.print("[dim]Install it on your repos, then provide the details below.[/dim]\n")
 
     cfg.github.app_id = typer.prompt("GitHub App ID", default=cfg.github.app_id or "")
     cfg.github.installation_id = typer.prompt("Installation ID", default=cfg.github.installation_id or "")
