@@ -428,3 +428,123 @@ def create_server_app() -> FastAPI:
     async def list_machines(request: Request):
         await _verify_token(request)
         state = FleetState.load()
+        return [m.model_dump() for m in state.machines.values()]
+
+    # ------------------------------------------------------------------
+    # Workers — reads
+    # ------------------------------------------------------------------
+
+    @app.get("/api/workers")
+    async def list_workers(request: Request):
+        await _verify_token(request)
+        state = FleetState.load()
+        workers = []
+        connected = set(_hub.connected_names())
+        for w in state.workers.values():
+            d = w.model_dump()
+            d["connected"] = w.name in connected
+            workers.append(d)
+        return workers
+
+    @app.get("/api/workers/{name}")
+    async def get_worker(name: str, request: Request):
+        await _verify_token(request)
+        state = FleetState.load()
+        if name not in state.workers:
+            raise HTTPException(status_code=404, detail=f"Worker '{name}' not found.")
+        worker = state.workers[name]
+        machine = state.machines.get(worker.machine_name)
+        connected = name in _hub.connected_names()
+
+        info = {
+            "name": worker.name,
+            "status": worker.status,
+            "machine_name": worker.machine_name,
+            "relay_port": worker.relay_port,
+            "model": worker.model,
+            "repos": worker.repos,
+            "created_at": worker.created_at,
+            "last_prompt": worker.last_prompt,
+            "last_prompt_at": worker.last_prompt_at,
+            "session_id": worker.session_id,
+            "connected": connected,
+        }
+        if machine:
+            info["provider"] = machine.provider
+            info["machine_ip"] = machine.ip
+
+        # Get live relay status from the connected worker
+        if connected:
+            try:
+                result = await _send_command_to_worker(name, {"type": "status"})
+                info["relay_alive"] = "error" not in result
+                info["message_count"] = result.get("message_count", 0)
+            except Exception:
+                info["relay_alive"] = False
+        else:
+            info["relay_alive"] = False
+
+        return info
+
+    # ------------------------------------------------------------------
+    # Workers — writes
+    # ------------------------------------------------------------------
+
+    @app.post("/api/workers")
+    async def spawn_worker(req: SpawnRequest, request: Request):
+        await _verify_token(request)
+        task_id = uuid.uuid4().hex[:8]
+        _tasks[task_id] = TaskInfo(
+            id=task_id,
+            operation="spawn",
+            worker_name=req.name,
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        resolved_vm_type = VMType(req.vm_type) if req.vm_type else None
+
+        asyncio.create_task(
+            _run_background_task(
+                task_id,
+                lambda: FleetEngine().spawn(
+                    name=req.name,
+                    machine_name=req.machine_name,
+                    repos=req.repos,
+                    model=req.model,
+                    vm_type=resolved_vm_type,
+                    instance_type=req.instance_type,
+                    region=req.region,
+                    provider=req.provider,
+                ),
+                cleanup_worker=req.name,
+            )
+        )
+        return {"task_id": task_id}
+
+    @app.delete("/api/workers/{name}")
+    async def kill_worker(name: str, request: Request, purge: bool = False):
+        await _verify_token(request)
+        task_id = uuid.uuid4().hex[:8]
+        _tasks[task_id] = TaskInfo(
+            id=task_id,
+            operation="kill",
+            worker_name=name,
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        asyncio.create_task(
+            _run_background_task(
+                task_id,
+                lambda name=name, purge=purge: FleetEngine().kill(name, purge=purge),
+            )
+        )
+        return {"task_id": task_id}
+
+    # ------------------------------------------------------------------
+    # Worker commands — routed via WebSocket or SSH fallback
+    # ------------------------------------------------------------------
+
+    @app.post("/api/workers/{name}/ask")
+    async def ask_worker(name: str, req: AskRequest, request: Request):
+        await _verify_token(request)
+        try:
