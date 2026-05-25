@@ -678,3 +678,126 @@ def create_server_app() -> FastAPI:
         cw = _hub.get(name)
         if cw:
             queue = cw.subscribe_events()
+            try:
+                while True:
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                        formatted = format_message(event) if "type" in event else str(event)
+                        if formatted.strip():
+                            yield {
+                                "event": "message",
+                                "data": json.dumps({"message": event, "formatted": formatted}),
+                            }
+                    except asyncio.TimeoutError:
+                        yield {"event": "keepalive", "data": "{}"}
+            finally:
+                cw.unsubscribe_events(queue)
+        else:
+            yield {"event": "info", "data": json.dumps({"message": "Worker not connected via WebSocket, use SSH logs"})}
+
+    # ------------------------------------------------------------------
+    # GitHub token broker
+    # ------------------------------------------------------------------
+
+    @app.post("/api/github/token")
+    async def github_token(request: Request):
+        """Generate a scoped GitHub installation token for the requesting worker.
+
+        Called by the credential helper on worker machines. Auth is via the
+        fleet bearer token. The worker_name is identified from the request body
+        or from the WebSocket registration.
+        """
+        await _verify_token(request)
+        body = await request.json()
+        worker_name = body.get("worker_name", "")
+        if not worker_name:
+            raise HTTPException(status_code=400, detail="Missing worker_name")
+
+        from cfleet.github import generate_installation_token, GitHubTokenError
+        try:
+            config = FleetConfig.load()
+            state = FleetState.load()
+            result = await _run_read(
+                lambda: generate_installation_token(config, worker_name, state)
+            )
+            return result
+        except GitHubTokenError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/api/github/level/{name}")
+    async def get_github_level(name: str, request: Request):
+        await _verify_token(request)
+        state = FleetState.load()
+        if name not in state.workers:
+            raise HTTPException(status_code=404, detail=f"Worker '{name}' not found.")
+        return {"worker_name": name, "github_level": state.workers[name].github_level}
+
+    @app.put("/api/github/level/{name}")
+    async def set_github_level(name: str, request: Request):
+        await _verify_token(request)
+        body = await request.json()
+        level_str = body.get("level", "")
+        try:
+            level = GitHubLevel(level_str)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid level '{level_str}'. Choose: none, read, triage, write",
+            )
+
+        state = FleetState.load()
+        if name not in state.workers:
+            raise HTTPException(status_code=404, detail=f"Worker '{name}' not found.")
+        old_level = state.workers[name].github_level
+        state.workers[name].github_level = level.value
+        state.save()
+
+        result = {
+            "worker_name": name,
+            "github_level": level.value,
+            "previous_level": old_level,
+        }
+
+        if level == GitHubLevel.WRITE:
+            from cfleet.github import warn_unprotected_repos
+            warnings = warn_unprotected_repos(FleetConfig.load(), state.workers[name].repos)
+            if warnings:
+                result["branch_protection_warnings"] = warnings
+
+        return result
+
+    @app.get("/api/github/log")
+    async def github_log(request: Request, worker_name: str = "", limit: int = 50):
+        await _verify_token(request)
+        state = FleetState.load()
+        entries = state.github_token_log
+        if worker_name:
+            entries = [e for e in entries if e.worker_name == worker_name]
+        entries = entries[-limit:]
+        return [e.model_dump() for e in entries]
+
+    # ------------------------------------------------------------------
+    # Tasks
+    # ------------------------------------------------------------------
+
+    @app.get("/api/tasks")
+    async def list_tasks(request: Request):
+        await _verify_token(request)
+        cutoff = datetime.now(timezone.utc).timestamp() - 3600
+        to_prune = [
+            tid for tid, t in _tasks.items()
+            if t.finished_at and datetime.fromisoformat(t.finished_at).timestamp() < cutoff
+        ]
+        for tid in to_prune:
+            del _tasks[tid]
+        return list(_tasks.values())
+
+    @app.get("/api/tasks/{task_id}")
+    async def get_task(task_id: str, request: Request):
+        await _verify_token(request)
+        task = _tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return task
+
+    return app
