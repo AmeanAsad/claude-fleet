@@ -118,3 +118,163 @@ class TaskInfo(BaseModel):
     finished_at: str | None = None
     error: str | None = None
 
+
+_tasks: dict[str, TaskInfo] = {}
+_MAX_FINISHED_TASKS = 200
+
+
+def _prune_tasks() -> None:
+    finished = [(tid, t) for tid, t in _tasks.items() if t.finished_at]
+    if len(finished) <= _MAX_FINISHED_TASKS:
+        return
+    finished.sort(key=lambda x: x[1].finished_at or "")
+    for tid, _ in finished[: len(finished) - _MAX_FINISHED_TASKS]:
+        del _tasks[tid]
+
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+
+
+class SpawnRequest(BaseModel):
+    name: str
+    machine_name: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    vm_type: str | None = None
+    instance_type: str | None = None
+    repos: list[str] | None = None
+    region: str | None = None
+
+
+class AskRequest(BaseModel):
+    prompt: str
+
+
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+
+def _get_server_token() -> str:
+    env_token = os.environ.get("FLEET_API_TOKEN", "")
+    if env_token:
+        return env_token
+    try:
+        config = FleetConfig.load()
+        return config.server.token
+    except FileNotFoundError:
+        return ""
+
+
+async def _verify_token(request: Request) -> None:
+    token = _get_server_token()
+    if not token:
+        return
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        bearer = auth_header[7:]
+        if hmac.compare_digest(bearer, token):
+            return
+    query_token = request.query_params.get("token", "")
+    if query_token and hmac.compare_digest(query_token, token):
+        return
+    raise HTTPException(status_code=401, detail="Invalid or missing token")
+
+
+def _verify_token_sync(token_value: str) -> bool:
+    expected = _get_server_token()
+    if not expected:
+        return True
+    return hmac.compare_digest(token_value, expected)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+async def _run_write(func):
+    async with _write_lock:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(_write_executor, func)
+
+
+async def _run_read(func):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_read_executor, func)
+
+
+async def _run_background_task(task_id: str, func, cleanup_worker: str | None = None):
+    try:
+        await _run_write(func)
+        _tasks[task_id].status = "completed"
+    except Exception as e:
+        _tasks[task_id].status = "failed"
+        _tasks[task_id].error = str(e)
+        if cleanup_worker:
+            try:
+                state = FleetState.load()
+                if cleanup_worker in state.workers:
+                    del state.workers[cleanup_worker]
+                    state.save()
+            except Exception:
+                pass
+    finally:
+        _tasks[task_id].finished_at = datetime.now(timezone.utc).isoformat()
+        _prune_tasks()
+
+
+async def _send_command_to_worker(worker_name: str, command: dict) -> dict:
+    """Send a command to a worker via WebSocket."""
+    cw = _hub.get(worker_name)
+    if not cw:
+        return {"error": f"Worker '{worker_name}' is not connected"}
+
+    request_id = uuid.uuid4().hex[:8]
+    command["request_id"] = request_id
+    future: asyncio.Future = asyncio.get_event_loop().create_future()
+    cw._pending_responses[request_id] = future
+    try:
+        await cw.ws.send_json(command)
+        return await asyncio.wait_for(future, timeout=30.0)
+    except asyncio.TimeoutError:
+        return {"error": "Worker did not respond within 30s"}
+    finally:
+        cw._pending_responses.pop(request_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Token generation
+# ---------------------------------------------------------------------------
+
+
+def generate_server_token() -> str:
+    """Generate a new server token and save it to config."""
+    token = secrets.token_urlsafe(32)
+    try:
+        config = FleetConfig.load()
+    except FileNotFoundError:
+        config = FleetConfig()
+    config.server.token = token
+    config.save()
+    return token
+
+
+# ---------------------------------------------------------------------------
+# App factory
+# ---------------------------------------------------------------------------
+
+
+def create_server_app() -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        _write_executor.shutdown(wait=False)
+        _read_executor.shutdown(wait=False)
+
+    app = FastAPI(title="Claude Fleet Server", version="1.0.0", lifespan=lifespan)
+
+    # ------------------------------------------------------------------
+    # Dashboard + Static
+    # ------------------------------------------------------------------
