@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-bg: #1f1e1b;
+  --color-surface: #2b2a27;
+  --color-surface-2: #393937;
+  --color-surface-3: #45443f;
+  --color-border: rgba(108, 106, 96, 0.25);
+  --color-border-light: rgba(108, 106, 96, 0.5);
+  --color-text: #eeeeee;
+  --color-text-dim: #9a9893;
+  --color-accent: #c4633a;
+  --color-accent-dim: #ae5630;
+  --color-accent-bright: #d97757;
+  --color-accent-glow: rgba(196, 99, 58, 0.08);
+  --color-accent-glow-strong: rgba(196, 99, 58, 0.18);
+  --color-green: #86e89a;
+  --color-yellow: #ffdf61;
+  --color-red: #df6666;
+  --color-cyan: #7ab8ff;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  height: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  height: 100dvh;
+  overflow: hidden;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-light);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}

@@ -23,13 +23,15 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from cfleet.config import FleetConfig, FleetState, GitHubLevel, VMType
 from cfleet.engine import FleetEngine
 
-STATIC_DIR = Path(__file__).parent / "static"
+# Next.js static export lives in web/out/ at the repo root
+STATIC_DIR = Path(__file__).parent.parent.parent / "web" / "out"
 
 _write_executor = ThreadPoolExecutor(max_workers=1)
 _write_lock = asyncio.Lock()
@@ -289,6 +291,17 @@ def create_server_app() -> FastAPI:
         if manifest_path.exists():
             return FileResponse(manifest_path)
         raise HTTPException(status_code=404)
+
+    @app.get("/favicon.ico")
+    async def favicon():
+        favicon_path = STATIC_DIR / "favicon.ico"
+        if favicon_path.exists():
+            return FileResponse(favicon_path)
+        raise HTTPException(status_code=404)
+
+    next_dir = STATIC_DIR / "_next"
+    if next_dir.exists():
+        app.mount("/_next", StaticFiles(directory=str(next_dir)), name="next-static")
 
     # ------------------------------------------------------------------
     # WebSocket hub — workers connect here
