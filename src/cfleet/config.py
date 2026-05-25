@@ -19,6 +19,27 @@ class VMType(str, Enum):
     TDX = "tdx"
 
 
+class GitHubLevel(str, Enum):
+    """GitHub access level for workers — controls token scoping."""
+    NONE = "none"
+    READ = "read"
+    TRIAGE = "triage"
+    WRITE = "write"
+
+
+GH_PERMISSION_MAP: dict[GitHubLevel, dict[str, str]] = {
+    GitHubLevel.NONE: {},
+    GitHubLevel.READ: {"contents": "read", "metadata": "read"},
+    GitHubLevel.TRIAGE: {"contents": "read", "metadata": "read", "issues": "write"},
+    GitHubLevel.WRITE: {
+        "contents": "write",
+        "metadata": "read",
+        "issues": "write",
+        "pull_requests": "write",
+    },
+}
+
+
 # Providers that require cloud infra (Pulumi + SSH)
 CLOUD_PROVIDERS = {"azure", "gcp"}
 
@@ -109,6 +130,19 @@ class CloudConfig(BaseModel):
     gcp: GcpConfig = GcpConfig()
 
 
+class GitHubConfig(BaseModel):
+    """GitHub App credentials for token brokering."""
+    app_id: str = ""
+    installation_id: str = ""
+    private_key_path: str = "~/.cfleet/github-app.pem"
+
+    def resolve_private_key_path(self) -> Path:
+        return Path(self.private_key_path).expanduser()
+
+    def is_configured(self) -> bool:
+        return bool(self.app_id and self.installation_id)
+
+
 class ServerConfig(BaseModel):
     """Central server config — used by both server and clients."""
     url: str = ""  # e.g. http://my-server:8420 — set via `cfleet connect`
@@ -135,6 +169,7 @@ class FleetConfig(BaseModel):
     pulumi: PulumiConfig = PulumiConfig()
     cloud: CloudConfig = CloudConfig()
     server: ServerConfig = ServerConfig()
+    github: GitHubConfig = GitHubConfig()
 
     @classmethod
     def load(cls, path: Path | None = None) -> FleetConfig:
@@ -219,14 +254,24 @@ class WorkerState(BaseModel):
     repos: list[str] = Field(default_factory=list)
     status: str = "spawning"  # spawning | provisioning | idle | working | errored | stopped
     session_id: Optional[str] = None
+    github_level: str = "none"  # none | read | triage | write
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_prompt: Optional[str] = None
     last_prompt_at: Optional[str] = None
 
 
+class GitHubTokenLog(BaseModel):
+    worker_name: str
+    level: str
+    repos: list[str] = Field(default_factory=list)
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    expires_at: str = ""
+
+
 class FleetState(BaseModel):
     machines: dict[str, MachineState] = Field(default_factory=dict)
     workers: dict[str, WorkerState] = Field(default_factory=dict)
+    github_token_log: list[GitHubTokenLog] = Field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path | None = None) -> FleetState:
