@@ -33,6 +33,18 @@ def _run(cmd: list[str], check: bool = True, capture: bool = True, **kwargs) -> 
     return subprocess.run(cmd, check=check, capture_output=capture, text=True, **kwargs)
 
 
+def _get_docker_bridge_gateway() -> str:
+    """Get the Docker bridge gateway IP (host-accessible from containers)."""
+    try:
+        r = _run(["docker", "network", "inspect", "bridge", "-f", "{{(index .IPAM.Config 0).Gateway}}"])
+        gw = r.stdout.strip()
+        if gw:
+            return gw
+    except (subprocess.CalledProcessError, IndexError):
+        pass
+    return "172.17.0.1"
+
+
 def docker_available() -> bool:
     """Check if Docker is installed and the daemon is reachable."""
     try:
@@ -90,6 +102,15 @@ def spawn_container(
             server_url = f"http://{fleet_config.server.host}:{fleet_config.server.port}"
         server_token = fleet_config.server.token
 
+    # Inside a container, 127.0.0.1/localhost refers to the container itself.
+    # Replace with the Docker bridge gateway so the relay can reach the host.
+    if server_url:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(server_url)
+        if parsed.hostname in ("127.0.0.1", "localhost", "0.0.0.0"):
+            bridge_ip = _get_docker_bridge_gateway()
+            server_url = urlunparse(parsed._replace(netloc=parsed.netloc.replace(parsed.hostname, bridge_ip)))
+
     # Env vars injected into the container
     env = {
         "ANTHROPIC_API_KEY": anthropic_api_key,
@@ -114,6 +135,7 @@ def spawn_container(
         "--name", f"cfleet-{name}",
         "--hostname", name,
         "--label", f"{FLEET_LABEL}={name}",
+        "--add-host", "host.docker.internal:host-gateway",
         "--init",
         "--cap-add=NET_ADMIN",
         "--cap-add=NET_RAW",
@@ -239,6 +261,11 @@ def _provision_container(
         elif fleet_config.server.host and fleet_config.server.port:
             srv_url = f"http://{fleet_config.server.host}:{fleet_config.server.port}"
         if srv_url:
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(srv_url)
+            if parsed.hostname in ("127.0.0.1", "localhost", "0.0.0.0"):
+                bridge_ip = _get_docker_bridge_gateway()
+                srv_url = urlunparse(parsed._replace(netloc=parsed.netloc.replace(parsed.hostname, bridge_ip)))
             server_args = f"--server-url {srv_url} --token {fleet_config.server.token} --worker-name {name}"
     _exec(
         f"nohup python3 /opt/cfleet-relay.py "

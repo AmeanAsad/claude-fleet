@@ -36,7 +36,7 @@ USER vscode
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
 # Python deps for worker relay (Agent SDK + web server)
-RUN pip install --no-cache-dir --break-system-packages claude-code-sdk httpx fastapi uvicorn sse-starlette pydantic
+RUN pip install --no-cache-dir --break-system-packages claude-code-sdk httpx fastapi uvicorn sse-starlette pydantic websockets
 
 ENV PATH="/home/vscode/.local/bin:$PATH"
 ENV TERM=xterm-256color
