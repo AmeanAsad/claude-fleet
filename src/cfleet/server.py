@@ -548,3 +548,133 @@ def create_server_app() -> FastAPI:
     async def ask_worker(name: str, req: AskRequest, request: Request):
         await _verify_token(request)
         try:
+            result = await _send_command_to_worker(name, {
+                "type": "ask",
+                "prompt": req.prompt,
+            })
+
+            # Update state
+            try:
+                state = FleetState.load()
+                if name in state.workers:
+                    w = state.workers[name]
+                    w.last_prompt = req.prompt
+                    w.last_prompt_at = datetime.now(timezone.utc).isoformat()
+                    w.status = "working"
+                    state.save()
+            except Exception:
+                pass
+
+            return result if "error" not in result else {"ok": True}
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    @app.post("/api/workers/{name}/interrupt")
+    async def interrupt_worker(name: str, request: Request):
+        await _verify_token(request)
+        try:
+            result = await _send_command_to_worker(name, {"type": "interrupt"})
+            return result if "error" not in result else {"ok": True}
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    # ------------------------------------------------------------------
+    # Messages
+    # ------------------------------------------------------------------
+
+    @app.get("/api/workers/{name}/messages")
+    async def get_messages(name: str, request: Request, offset: int = 0, limit: int = 200):
+        await _verify_token(request)
+        try:
+            result = await _send_command_to_worker(name, {
+                "type": "messages",
+                "offset": offset,
+                "limit": limit,
+            })
+            return result
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception:
+            return {"messages": [], "error": "Worker unreachable"}
+
+    # ------------------------------------------------------------------
+    # Usage
+    # ------------------------------------------------------------------
+
+    @app.get("/api/workers/{name}/usage")
+    async def get_worker_usage(name: str, request: Request):
+        await _verify_token(request)
+        try:
+            result = await _send_command_to_worker(name, {"type": "status"})
+            state = FleetState.load()
+            worker = state.get_worker(name)
+            return {
+                "name": name,
+                "model": worker.model,
+                "total_input_tokens": result.get("total_input_tokens", 0),
+                "total_output_tokens": result.get("total_output_tokens", 0),
+                "total_cost_usd": result.get("total_cost_usd", 0.0),
+            }
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    # ------------------------------------------------------------------
+    # Logs — SSE stream via worker events
+    # ------------------------------------------------------------------
+
+    @app.get("/api/workers/{name}/logs/snapshot")
+    async def log_snapshot(name: str, request: Request, lines: int = 100):
+        await _verify_token(request)
+        try:
+            result = await _send_command_to_worker(name, {
+                "type": "messages",
+                "offset": 0,
+                "limit": lines,
+            })
+            from cfleet.relay_client import format_message
+            formatted = []
+            for msg in result.get("messages", []):
+                f = format_message(msg)
+                if f.strip():
+                    formatted.append(f)
+            return {"lines": "\n".join(formatted)}
+        except (KeyError, ValueError) as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    @app.get("/api/workers/{name}/logs")
+    async def stream_logs(name: str, request: Request):
+        await _verify_token(request)
+        try:
+            FleetState.load().get_worker(name)
+        except (KeyError, ValueError) as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        return EventSourceResponse(_log_generator(name))
+
+    async def _log_generator(name: str) -> AsyncGenerator[dict, None]:
+        from cfleet.relay_client import format_message
+
+        # Send existing messages first
+        try:
+            result = await _send_command_to_worker(name, {
+                "type": "messages", "offset": 0, "limit": 200,
+            })
+            messages = result.get("messages", [])
+            if messages:
+                formatted = []
+                for msg in messages:
+                    f = format_message(msg)
+                    if f.strip():
+                        formatted.append(f)
+                if formatted:
+                    yield {
+                        "event": "logs",
+                        "data": json.dumps({"content": "\n".join(formatted)}),
+                    }
+        except Exception:
+            pass
+
+        # Stream new events from WebSocket-connected worker
+        cw = _hub.get(name)
+        if cw:
+            queue = cw.subscribe_events()
