@@ -1,7 +1,7 @@
 """HTTP client for communicating with the worker relay service.
 
 Used by FleetEngine, the API server, and the TUI to interact with workers
-through the Agent SDK relay instead of tmux.
+through the Agent SDK relay.
 """
 
 from __future__ import annotations
