@@ -278,3 +278,153 @@ def create_server_app() -> FastAPI:
     # ------------------------------------------------------------------
     # Dashboard + Static
     # ------------------------------------------------------------------
+
+    @app.get("/")
+    async def dashboard():
+        return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/manifest.json")
+    async def manifest():
+        manifest_path = STATIC_DIR / "manifest.json"
+        if manifest_path.exists():
+            return FileResponse(manifest_path)
+        raise HTTPException(status_code=404)
+
+    # ------------------------------------------------------------------
+    # WebSocket hub — workers connect here
+    # ------------------------------------------------------------------
+
+    @app.websocket("/ws")
+    async def worker_websocket(ws: WebSocket):
+        await ws.accept()
+
+        # First message must be registration
+        try:
+            reg = await asyncio.wait_for(ws.receive_json(), timeout=10.0)
+        except (asyncio.TimeoutError, Exception):
+            await ws.close(code=4001, reason="Registration timeout")
+            return
+
+        if reg.get("type") != "register":
+            await ws.close(code=4002, reason="First message must be register")
+            return
+
+        token = reg.get("token", "")
+        if not _verify_token_sync(token):
+            await ws.close(code=4003, reason="Invalid token")
+            return
+
+        worker_name = reg.get("worker_name", "")
+        machine_name = reg.get("machine_name", "")
+        if not worker_name:
+            await ws.close(code=4004, reason="Missing worker_name")
+            return
+
+        cw = await _hub.register(ws, worker_name, machine_name)
+
+        # Update state to reflect connected worker
+        try:
+            state = FleetState.load()
+            if worker_name in state.workers:
+                w = state.workers[worker_name]
+                if w.status in ("spawning", "provisioning", "errored"):
+                    w.status = "idle"
+                    state.save()
+        except Exception:
+            pass
+
+        await ws.send_json({"type": "registered", "worker_name": worker_name})
+
+        # Message loop
+        try:
+            while True:
+                data = await ws.receive_json()
+                msg_type = data.get("type")
+
+                if msg_type == "heartbeat":
+                    cw.last_heartbeat = datetime.now(timezone.utc).isoformat()
+                    await ws.send_json({"type": "heartbeat_ack"})
+
+                elif msg_type == "response":
+                    request_id = data.get("request_id")
+                    if request_id and request_id in cw._pending_responses:
+                        cw._pending_responses[request_id].set_result(data.get("data", {}))
+
+                elif msg_type == "event":
+                    cw.push_event(data.get("data", {}))
+
+                elif msg_type == "status_update":
+                    try:
+                        state = FleetState.load()
+                        if worker_name in state.workers:
+                            new_status = data.get("status")
+                            if new_status in ("idle", "working", "errored"):
+                                state.workers[worker_name].status = new_status
+                                state.save()
+                    except Exception:
+                        pass
+
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+        finally:
+            await _hub.unregister(worker_name)
+
+    # ------------------------------------------------------------------
+    # Server info
+    # ------------------------------------------------------------------
+
+    @app.get("/api/server/info")
+    async def server_info(request: Request):
+        await _verify_token(request)
+        connected = _hub.connected_names()
+        return {
+            "version": "1.0.0",
+            "connected_workers": connected,
+            "connected_count": len(connected),
+        }
+
+    # ------------------------------------------------------------------
+    # Config
+    # ------------------------------------------------------------------
+
+    @app.get("/api/config")
+    async def get_config(request: Request):
+        await _verify_token(request)
+        from cfleet.config import DEFAULT_SKUS, PROVIDER_DEFAULTS
+        config = FleetConfig.load()
+        return {
+            "provider": config.cloud.provider,
+            "model": config.model,
+            "region": config.resolve_region(),
+            "ssh_user": config.resolve_ssh_user(),
+            "instance_type": config.resolve_instance_type(),
+            "vm_type": config.cloud.vm_type.value,
+            "providers": {
+                "azure": {
+                    "region": PROVIDER_DEFAULTS["azure"]["region"],
+                    "instance_type": PROVIDER_DEFAULTS["azure"]["instance_type"],
+                    "skus": {k.value: v for k, v in DEFAULT_SKUS.get("azure", {}).items()},
+                },
+                "gcp": {
+                    "region": PROVIDER_DEFAULTS["gcp"]["region"],
+                    "instance_type": PROVIDER_DEFAULTS["gcp"]["instance_type"],
+                    "skus": {k.value: v for k, v in DEFAULT_SKUS.get("gcp", {}).items()},
+                },
+                "devcontainer": {
+                    "region": "local",
+                    "instance_type": "docker",
+                    "skus": {},
+                },
+            },
+        }
+
+    # ------------------------------------------------------------------
+    # Machines
+    # ------------------------------------------------------------------
+
+    @app.get("/api/machines")
+    async def list_machines(request: Request):
+        await _verify_token(request)
+        state = FleetState.load()
