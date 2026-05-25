@@ -481,8 +481,6 @@ async def _ws_client_loop(
             backoff = min(backoff * 2, max_backoff)
 
 
-
-
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -496,12 +494,48 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--model", default="")
     parser.add_argument("--cwd", default="/workspace")
+    parser.add_argument("--server-url", default="")
+    parser.add_argument("--token", default="")
+    parser.add_argument("--worker-name", default="")
+    parser.add_argument("--machine-name", default="")
     args = parser.parse_args()
 
-    app = create_relay_app(model=args.model, cwd=args.cwd)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    server_url = args.server_url or os.environ.get("CFLEET_SERVER_URL", "")
+    token = args.token or os.environ.get("CFLEET_TOKEN", "")
+    worker_name = args.worker_name or os.environ.get("CFLEET_WORKER_NAME", "")
+    machine_name = args.machine_name or os.environ.get("CFLEET_MACHINE_NAME", "")
+
+    _scrubber.load_from_env_file()
+    if token:
+        _scrubber.add_secret("CFLEET_TOKEN", token)
+    for env_key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_API_KEY"):
+        val = os.environ.get(env_key, "")
+        if val:
+            _scrubber.add_secret(env_key, val)
+
+    effective_model = args.model or os.environ.get("CFLEET_MODEL", "claude-opus-4-6")
+    app = create_relay_app(model=effective_model, cwd=args.cwd)
+
+    if server_url and worker_name:
+        # Run both the local HTTP server and the WebSocket client
+        async def _run_both():
+            import uvicorn as _uv
+            config = _uv.Config(app, host=args.host, port=args.port, log_level="warning")
+            server = _uv.Server(config)
+
+            ws_task = asyncio.create_task(
+                _ws_client_loop(server_url, token, worker_name, machine_name, effective_model, args.cwd)
+            )
+
+            try:
+                await server.serve()
+            finally:
+                ws_task.cancel()
+
+        asyncio.run(_run_both())
+    else:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":
     main()
-
