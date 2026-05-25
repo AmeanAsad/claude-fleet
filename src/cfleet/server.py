@@ -367,8 +367,8 @@ def create_server_app() -> FastAPI:
         raise HTTPException(status_code=404)
 
     next_dir = STATIC_DIR / "_next"
-    if next_dir.exists():
-        app.mount("/_next", StaticFiles(directory=str(next_dir)), name="next-static")
+    next_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/_next", StaticFiles(directory=str(next_dir)), name="next-static")
 
     # ------------------------------------------------------------------
     # WebSocket hub — workers connect here

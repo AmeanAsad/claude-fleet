@@ -670,9 +670,10 @@ def join(
 
     effective_api_key = api_key or cfg.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
 
+    if not effective_api_key:
+        effective_api_key = typer.prompt("Anthropic API key", hide_input=True)
+
     if not skip_bootstrap:
-        if not effective_api_key:
-            effective_api_key = typer.prompt("Anthropic API key", hide_input=True)
         from cfleet.provisioner import local_bootstrap
         local_bootstrap(api_key=effective_api_key, model=model)
 
