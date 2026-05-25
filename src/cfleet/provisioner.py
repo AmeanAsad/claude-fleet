@@ -296,6 +296,7 @@ def provision_worker(
     fleet_config,
     machine_name: str = "",
     workspace: str = "/workspace",
+    github_level: str = "none",
 ) -> None:
     """Provision a single worker on an already-bootstrapped machine."""
     _stage_files(ip, user, key_path, worker_name, fleet_config)
@@ -320,6 +321,7 @@ def provision_worker(
         "CFLEET_SERVER_URL": server_url,
         "CFLEET_TOKEN": server_token,
         "CFLEET_MACHINE_NAME": machine_name,
+        "CFLEET_GH_LEVEL": github_level,
     }
 
     ssh_run_script(ip, user, key_path, _provision_worker_sh(), env_vars=env_vars, timeout=600)
