@@ -108,6 +108,73 @@ _hub = WorkerHub()
 
 
 # ---------------------------------------------------------------------------
+# WebSocket machine hub — external machines connect here
+# ---------------------------------------------------------------------------
+
+
+class ConnectedMachine:
+    """Represents an external machine connected via WebSocket."""
+
+    def __init__(self, ws: WebSocket, machine_name: str, system_info: dict):
+        self.ws = ws
+        self.machine_name = machine_name
+        self.system_info = system_info
+        self.connected_at = datetime.now(timezone.utc).isoformat()
+        self.last_heartbeat = datetime.now(timezone.utc).isoformat()
+        self.worker_names: list[str] = []
+        self._pending_responses: dict[str, asyncio.Future] = {}
+
+    async def send_command(self, command: dict, timeout: float = 60.0) -> dict:
+        request_id = uuid.uuid4().hex[:8]
+        command["request_id"] = request_id
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending_responses[request_id] = future
+        try:
+            await self.ws.send_json(command)
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            return {"error": "Machine did not respond in time"}
+        finally:
+            self._pending_responses.pop(request_id, None)
+
+
+class MachineHub:
+    """Manages WebSocket connections from external machines."""
+
+    def __init__(self):
+        self._machines: dict[str, ConnectedMachine] = {}
+        self._lock = asyncio.Lock()
+
+    async def register(self, ws: WebSocket, machine_name: str, system_info: dict) -> ConnectedMachine:
+        async with self._lock:
+            old = self._machines.get(machine_name)
+            if old:
+                try:
+                    await old.ws.close()
+                except Exception:
+                    pass
+            cm = ConnectedMachine(ws, machine_name, system_info)
+            self._machines[machine_name] = cm
+            return cm
+
+    async def unregister(self, machine_name: str) -> None:
+        async with self._lock:
+            self._machines.pop(machine_name, None)
+
+    def get(self, machine_name: str) -> ConnectedMachine | None:
+        return self._machines.get(machine_name)
+
+    def connected_names(self) -> list[str]:
+        return list(self._machines.keys())
+
+    def all_machines(self) -> list[ConnectedMachine]:
+        return list(self._machines.values())
+
+
+_machine_hub = MachineHub()
+
+
+# ---------------------------------------------------------------------------
 # Background task registry
 # ---------------------------------------------------------------------------
 
@@ -335,7 +402,7 @@ def create_server_app() -> FastAPI:
 
         cw = await _hub.register(ws, worker_name, machine_name)
 
-        # Update state to reflect connected worker
+        # Update state to reflect connected worker (auto-create if started via `cfleet agent`)
         try:
             state = FleetState.load()
             if worker_name in state.workers:
@@ -343,6 +410,16 @@ def create_server_app() -> FastAPI:
                 if w.status in ("spawning", "provisioning", "errored"):
                     w.status = "idle"
                     state.save()
+            else:
+                from cfleet.config import WorkerState as WS
+                w = WS(
+                    name=worker_name,
+                    machine_name=machine_name,
+                    status="idle",
+                    local_mode=True,
+                )
+                state.add_worker(w)
+                state.save()
         except Exception:
             pass
 
@@ -383,6 +460,110 @@ def create_server_app() -> FastAPI:
             pass
         finally:
             await _hub.unregister(worker_name)
+            try:
+                state = FleetState.load()
+                if worker_name in state.workers:
+                    w = state.workers[worker_name]
+                    if w.local_mode:
+                        state.remove_worker(worker_name)
+                    else:
+                        w.status = "stopped"
+                    state.save()
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # WebSocket hub — external machines connect here
+    # ------------------------------------------------------------------
+
+    @app.websocket("/ws/machine")
+    async def machine_websocket(ws: WebSocket):
+        await ws.accept()
+
+        try:
+            reg = await asyncio.wait_for(ws.receive_json(), timeout=10.0)
+        except (asyncio.TimeoutError, Exception):
+            await ws.close(code=4001, reason="Registration timeout")
+            return
+
+        if reg.get("type") != "register":
+            await ws.close(code=4002, reason="First message must be register")
+            return
+
+        token = reg.get("token", "")
+        if not _verify_token_sync(token):
+            await ws.close(code=4003, reason="Invalid token")
+            return
+
+        machine_name = reg.get("machine_name", "")
+        if not machine_name:
+            await ws.close(code=4004, reason="Missing machine_name")
+            return
+
+        system_info = reg.get("system_info", {})
+        worker_names = reg.get("worker_names", [])
+
+        cm = await _machine_hub.register(ws, machine_name, system_info)
+        cm.worker_names = worker_names
+
+        # Create or update machine in state
+        try:
+            state = FleetState.load()
+            if machine_name not in state.machines:
+                from cfleet.config import MachineState
+                machine = MachineState(
+                    name=machine_name,
+                    provider="external",
+                    hostname=system_info.get("hostname", ""),
+                    os_info=system_info.get("os", ""),
+                    status="ready",
+                )
+                state.add_machine(machine)
+            else:
+                machine = state.machines[machine_name]
+                machine.provider = "external"
+                machine.hostname = system_info.get("hostname", "")
+                machine.os_info = system_info.get("os", "")
+                machine.status = "ready"
+            state.save()
+        except Exception:
+            pass
+
+        await ws.send_json({"type": "registered", "machine_name": machine_name})
+
+        try:
+            while True:
+                data = await ws.receive_json()
+                msg_type = data.get("type")
+
+                if msg_type == "heartbeat":
+                    cm.last_heartbeat = datetime.now(timezone.utc).isoformat()
+                    cm.worker_names = data.get("worker_names", cm.worker_names)
+                    await ws.send_json({"type": "heartbeat_ack"})
+
+                elif msg_type == "response":
+                    request_id = data.get("request_id")
+                    if request_id and request_id in cm._pending_responses:
+                        cm._pending_responses[request_id].set_result(data.get("data", {}))
+
+                elif msg_type == "pong":
+                    request_id = data.get("request_id")
+                    if request_id and request_id in cm._pending_responses:
+                        cm._pending_responses[request_id].set_result({"ok": True})
+
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+        finally:
+            await _machine_hub.unregister(machine_name)
+            try:
+                state = FleetState.load()
+                if machine_name in state.machines:
+                    state.machines[machine_name].status = "disconnected"
+                    state.save()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Server info
@@ -392,10 +573,13 @@ def create_server_app() -> FastAPI:
     async def server_info(request: Request):
         await _verify_token(request)
         connected = _hub.connected_names()
+        connected_machines = _machine_hub.connected_names()
         return {
             "version": "1.0.0",
             "connected_workers": connected,
             "connected_count": len(connected),
+            "connected_machines": connected_machines,
+            "connected_machine_count": len(connected_machines),
         }
 
     # ------------------------------------------------------------------
@@ -441,7 +625,54 @@ def create_server_app() -> FastAPI:
     async def list_machines(request: Request):
         await _verify_token(request)
         state = FleetState.load()
-        return [m.model_dump() for m in state.machines.values()]
+        connected_machines = set(_machine_hub.connected_names())
+        result = []
+        for m in state.machines.values():
+            d = m.model_dump()
+            d["connected"] = m.name in connected_machines if m.provider == "external" else None
+            result.append(d)
+        return result
+
+    @app.post("/api/machines/{name}/spawn")
+    async def spawn_on_machine(name: str, request: Request):
+        """Send a spawn command to an external machine via its WebSocket."""
+        await _verify_token(request)
+        body = await request.json()
+        worker_name = body.get("worker_name", "")
+        if not worker_name:
+            raise HTTPException(status_code=400, detail="Missing worker_name")
+
+        cm = _machine_hub.get(name)
+        if not cm:
+            raise HTTPException(status_code=404, detail=f"Machine '{name}' is not connected")
+
+        result = await cm.send_command({
+            "type": "spawn_worker",
+            "worker_name": worker_name,
+            "model": body.get("model", ""),
+            "repos": body.get("repos", []),
+            "cwd": body.get("cwd", ""),
+        })
+        return result
+
+    @app.post("/api/machines/{name}/kill")
+    async def kill_on_machine(name: str, request: Request):
+        """Send a kill command to an external machine via its WebSocket."""
+        await _verify_token(request)
+        body = await request.json()
+        worker_name = body.get("worker_name", "")
+        if not worker_name:
+            raise HTTPException(status_code=400, detail="Missing worker_name")
+
+        cm = _machine_hub.get(name)
+        if not cm:
+            raise HTTPException(status_code=404, detail=f"Machine '{name}' is not connected")
+
+        result = await cm.send_command({
+            "type": "kill_worker",
+            "worker_name": worker_name,
+        })
+        return result
 
     # ------------------------------------------------------------------
     # Workers — reads

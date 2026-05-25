@@ -74,6 +74,11 @@ PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
         "ssh_user": "vscode",
         "instance_type": "docker",
     },
+    "external": {
+        "region": "",
+        "ssh_user": "",
+        "instance_type": "",
+    },
 }
 
 
@@ -233,14 +238,16 @@ class FleetConfig(BaseModel):
 
 class MachineState(BaseModel):
     name: str
-    provider: str = ""  # azure | gcp | devcontainer
+    provider: str = ""  # azure | gcp | devcontainer | external
     ip: str = ""
     region: str = ""
     instance_type: str = ""
     vm_type: str = "regular"  # regular | snp | tdx
     ssh_user: str = ""
     container_id: str = ""  # devcontainer only
-    status: str = "creating"  # creating | provisioning | ready | errored | stopped
+    hostname: str = ""  # external only — reported by the machine agent
+    os_info: str = ""  # external only — e.g. "Ubuntu 24.04"
+    status: str = "creating"  # creating | provisioning | ready | errored | stopped | disconnected
     worker_names: list[str] = Field(default_factory=list)
     next_relay_port: int = 8421
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -255,6 +262,7 @@ class WorkerState(BaseModel):
     status: str = "spawning"  # spawning | provisioning | idle | working | errored | stopped
     session_id: Optional[str] = None
     github_level: str = "none"  # none | read | triage | write
+    local_mode: bool = False  # True when started via `cfleet agent`
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_prompt: Optional[str] = None
     last_prompt_at: Optional[str] = None

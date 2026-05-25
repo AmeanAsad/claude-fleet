@@ -173,7 +173,7 @@ class FleetEngine:
         elif effective_provider == "gcp":
             if not self.config.cloud.gcp.project_id:
                 missing.append("cloud.gcp.project_id")
-        elif effective_provider == "devcontainer":
+        elif effective_provider in ("devcontainer", "external"):
             pass
         if effective_provider in CLOUD_PROVIDERS:
             if not self.config.resolve_ssh_user(provider=effective_provider):
@@ -288,7 +288,7 @@ class FleetEngine:
             self.kill(wname, force=True, purge=purge)
 
         if not purge and not keep_vm:
-            if machine.provider == "devcontainer":
+            if machine.provider in ("devcontainer", "external"):
                 pass
             else:
                 console.print(f"Destroying VM [bold]{name}[/bold]...")
@@ -360,7 +360,9 @@ class FleetEngine:
 
         repo_configs = [r.model_dump() for r in self.config.repos if r.name in effective_repos]
 
-        if machine.provider == "devcontainer":
+        if machine.provider == "external":
+            self._spawn_worker_external(worker, machine, effective_model, repo_configs)
+        elif machine.provider == "devcontainer":
             self._spawn_worker_devcontainer(worker, machine, effective_model, repo_configs)
         else:
             self._spawn_worker_cloud(worker, machine, effective_model, repo_configs)
@@ -388,6 +390,18 @@ class FleetEngine:
         )
         machine.container_id = container_id
         self._save_state()
+
+    def _spawn_worker_external(
+        self, worker: WorkerState, machine: MachineState, model: str, repos: list[dict]
+    ) -> None:
+        console.print(f"Sending spawn to external machine [bold]{machine.name}[/bold]...")
+        result = self._api_post(f"/api/machines/{machine.name}/spawn", {
+            "worker_name": worker.name,
+            "model": model,
+            "repos": repos,
+        })
+        if "error" in result:
+            raise RuntimeError(f"Remote spawn failed: {result['error']}")
 
     def _spawn_worker_cloud(
         self, worker: WorkerState, machine: MachineState, model: str, repos: list[dict]
@@ -446,7 +460,14 @@ class FleetEngine:
         if not purge and worker:
             machine = self.state.machines.get(worker.machine_name)
             if machine:
-                if machine.provider == "devcontainer":
+                if machine.provider == "external":
+                    try:
+                        self._api_post(f"/api/machines/{machine.name}/kill", {
+                            "worker_name": name,
+                        })
+                    except Exception as e:
+                        console.print(f"[yellow]Warning: Failed to kill worker on external machine: {e}[/yellow]")
+                elif machine.provider == "devcontainer":
                     from cfleet.devcontainer import kill_container
                     try:
                         kill_container(worker.name)

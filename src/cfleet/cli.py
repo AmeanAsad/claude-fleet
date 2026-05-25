@@ -244,11 +244,12 @@ def machine_ls():
         "provisioning": "cyan",
         "errored": "red",
         "stopped": "dim",
+        "disconnected": "yellow",
     }
 
     for m in machines:
         color = status_colors.get(m.status, "white")
-        ip_display = m.ip or (m.container_id[:12] if m.container_id else "-")
+        ip_display = m.ip or m.hostname or (m.container_id[:12] if m.container_id else "-")
         workers_display = ", ".join(m.worker_names) if m.worker_names else "-"
         table.add_row(
             m.name,
@@ -635,6 +636,190 @@ def tui():
     from cfleet.tui import FleetTUI
     app_tui = FleetTUI()
     app_tui.run()
+
+
+# --------------------------------------------------------------------------
+# cfleet join
+# --------------------------------------------------------------------------
+
+@app.command()
+def join(
+    server_url: str = typer.Argument(..., help="Server URL (e.g. http://my-server:8420)"),
+    token: Optional[str] = typer.Option(None, "--token", "-t", help="Server token"),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="Machine name (defaults to hostname)"),
+    api_key: Optional[str] = typer.Option(None, "--api-key", help="Anthropic API key"),
+    model: str = typer.Option("claude-opus-4-6", "--model", "-m", help="Default model"),
+    skip_bootstrap: bool = typer.Option(False, "--skip-bootstrap", help="Skip system deps install"),
+):
+    """Join the fleet — bootstrap this machine and register with the server.
+
+    Installs system deps, Claude Code CLI, and relay dependencies, then
+    connects to the server and listens for spawn/kill commands.
+    """
+    import asyncio
+    import platform
+    from cfleet.config import FleetConfig, FLEET_DIR, CONFIG_PATH
+
+    machine_name = name or platform.node()
+
+    try:
+        cfg = FleetConfig.load()
+    except FileNotFoundError:
+        FLEET_DIR.mkdir(parents=True, exist_ok=True)
+        cfg = FleetConfig()
+
+    effective_api_key = api_key or cfg.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+
+    if not skip_bootstrap:
+        if not effective_api_key:
+            effective_api_key = typer.prompt("Anthropic API key", hide_input=True)
+        from cfleet.provisioner import local_bootstrap
+        local_bootstrap(api_key=effective_api_key, model=model)
+
+    cfg.server.url = server_url.rstrip("/")
+    if token:
+        cfg.server.token = token
+    if effective_api_key:
+        cfg.anthropic_api_key = effective_api_key
+    cfg.model = model
+    cfg.save()
+
+    effective_token = token or cfg.server.token
+    if not effective_token:
+        console.print("[red]No server token. Pass --token or set it in config.yml[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"Joining fleet as [bold]{machine_name}[/bold] → {server_url}")
+
+    from cfleet.machine_agent import MachineAgent
+    agent = MachineAgent(
+        server_url=server_url,
+        token=effective_token,
+        machine_name=machine_name,
+        api_key=effective_api_key,
+        model=model,
+    )
+    asyncio.run(agent.run())
+
+
+# --------------------------------------------------------------------------
+# cfleet agent
+# --------------------------------------------------------------------------
+
+@app.command()
+def agent(
+    name: str = typer.Argument(..., help="Worker name"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Override model"),
+    cwd: Optional[str] = typer.Option(None, "--cwd", help="Working directory (skip workspace provisioning)"),
+    port: int = typer.Option(8421, "--port", "-p", help="Relay HTTP port"),
+    server_url: Optional[str] = typer.Option(None, "--server-url", "-s", help="Server URL (reads from config if omitted)"),
+    token: Optional[str] = typer.Option(None, "--token", "-t", help="Server token"),
+):
+    """Start a local worker and register it with the fleet server.
+
+    Run this on a machine that has already joined the fleet (via `cfleet join`)
+    or has cfleet installed. The worker appears in the dashboard and can receive
+    prompts from anywhere.
+    """
+    import asyncio
+    import platform
+    from cfleet.config import FleetConfig
+
+    try:
+        cfg = FleetConfig.load()
+    except FileNotFoundError:
+        console.print("[red]Run 'cfleet init' or 'cfleet join' first.[/red]")
+        raise typer.Exit(1)
+
+    effective_model = model or cfg.model
+    effective_server_url = server_url or cfg.server.url
+    effective_token = token or cfg.server.token
+    machine_name = platform.node()
+
+    if not effective_server_url:
+        console.print("[red]No server URL. Pass --server-url or run 'cfleet join' first.[/red]")
+        raise typer.Exit(1)
+
+    if not effective_token:
+        console.print("[red]No server token. Pass --token or set it in config.yml[/red]")
+        raise typer.Exit(1)
+
+    workspace = cwd
+    if not workspace:
+        from cfleet.provisioner import local_provision_worker
+        repo_configs = [r.model_dump() for r in cfg.repos]
+        workspace = local_provision_worker(
+            worker_name=name,
+            relay_port=port,
+            model=effective_model,
+            repos=repo_configs,
+            fleet_config=cfg,
+        )
+
+    console.print(f"Starting worker [bold]{name}[/bold] on {machine_name}")
+    console.print(f"  Server:    {effective_server_url}")
+    console.print(f"  Workspace: {workspace}")
+    console.print(f"  Model:     {effective_model}")
+    console.print(f"  Port:      {port}")
+    console.print("[dim]Press Ctrl+C to stop.[/dim]")
+
+    from cfleet.worker_relay import create_relay_app, _ws_client_loop, _scrubber, state as relay_state
+
+    _scrubber.load_from_env_file()
+    if effective_token:
+        _scrubber.add_secret("CFLEET_TOKEN", effective_token)
+    for env_key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_API_KEY"):
+        val = os.environ.get(env_key, "") or cfg.anthropic_api_key
+        if val:
+            _scrubber.add_secret(env_key, val)
+            os.environ.setdefault(env_key, val)
+
+    relay_app = create_relay_app(model=effective_model, cwd=workspace)
+
+    async def _run():
+        import uvicorn as _uv
+        config = _uv.Config(relay_app, host="127.0.0.1", port=port, log_level="warning")
+        server = _uv.Server(config)
+
+        ws_task = asyncio.create_task(
+            _ws_client_loop(effective_server_url, effective_token, name, machine_name, effective_model, workspace)
+        )
+
+        try:
+            await server.serve()
+        finally:
+            ws_task.cancel()
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        console.print(f"\n[dim]Worker {name} stopped.[/dim]")
+
+
+# --------------------------------------------------------------------------
+# cfleet leave
+# --------------------------------------------------------------------------
+
+@app.command()
+def leave():
+    """Disconnect this machine from the fleet server."""
+    from cfleet.config import FleetConfig
+
+    try:
+        cfg = FleetConfig.load()
+    except FileNotFoundError:
+        console.print("[red]Not configured. Nothing to leave.[/red]")
+        raise typer.Exit(1)
+
+    old_url = cfg.server.url
+    cfg.server.url = ""
+    cfg.server.token = ""
+    cfg.save()
+
+    if old_url:
+        console.print(f"[green]Left fleet at {old_url}. Server URL and token cleared.[/green]")
+    else:
+        console.print("[dim]No fleet connection configured.[/dim]")
 
 
 # --------------------------------------------------------------------------
