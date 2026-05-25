@@ -21,6 +21,47 @@ from sse_starlette.sse import EventSourceResponse
 
 
 # ---------------------------------------------------------------------------
+# Output scrubbing — redact known secrets before sending to server
+# ---------------------------------------------------------------------------
+
+class SecretScrubber:
+    """Replaces known secret values with [REDACTED] in outbound messages."""
+
+    def __init__(self) -> None:
+        self._secrets: dict[str, str] = {}
+
+    def load_from_env_file(self, path: str = "") -> None:
+        from pathlib import Path
+        env_path = Path(path) if path else Path.home() / ".cfleet-env"
+        if not env_path.exists():
+            return
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            value = value.strip()
+            if len(value) >= 8:
+                self._secrets[key.strip()] = value
+
+    def add_secret(self, name: str, value: str) -> None:
+        if len(value) >= 8:
+            self._secrets[name] = value
+
+    def scrub(self, text: str) -> str:
+        for name, value in self._secrets.items():
+            if value in text:
+                text = text.replace(value, f"[REDACTED:{name}]")
+        return text
+
+    def scrub_dict(self, d: dict) -> dict:
+        return json.loads(self.scrub(json.dumps(d)))
+
+
+_scrubber = SecretScrubber()
+
+
+# ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
 
@@ -241,7 +282,7 @@ def create_relay_app(model: str = "", cwd: str = "/workspace") -> FastAPI:
 
     @app.get("/messages")
     async def get_messages(offset: int = 0, limit: int = 200):
-        msgs = state.messages[offset:offset + limit]
+        msgs = [_scrubber.scrub_dict(m) for m in state.messages[offset:offset + limit]]
         return {
             "messages": msgs,
             "total": len(state.messages),
@@ -258,7 +299,7 @@ def create_relay_app(model: str = "", cwd: str = "/workspace") -> FastAPI:
                 while True:
                     try:
                         msg = await asyncio.wait_for(queue.get(), timeout=30.0)
-                        yield {"event": "message", "data": json.dumps(msg)}
+                        yield {"event": "message", "data": json.dumps(_scrubber.scrub_dict(msg))}
                     except asyncio.TimeoutError:
                         yield {
                             "event": "keepalive",
@@ -270,6 +311,8 @@ def create_relay_app(model: str = "", cwd: str = "/workspace") -> FastAPI:
         return EventSourceResponse(event_generator())
 
     return app
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -293,3 +336,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
