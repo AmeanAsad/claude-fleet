@@ -1,8 +1,75 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Message, ContentBlock } from "@/lib/types";
-import { esc, renderMarkdown, fmtNum } from "@/lib/format";
+import { renderMarkdown, fmtNum } from "@/lib/format";
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={async (ev) => {
+        ev.preventDefault();
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
+        } catch {
+          /* ignore */
+        }
+      }}
+      className="absolute top-1.5 right-1.5 text-[10px] px-1.5 py-0.5 rounded border border-border text-text-dim hover:border-text hover:text-text bg-surface/80 backdrop-blur-sm cursor-pointer transition-colors"
+      type="button"
+    >
+      {copied ? "copied" : "copy"}
+    </button>
+  );
+}
+
+function CodeBlock({ code, lang }: { code: string; lang?: string }) {
+  return (
+    <div className="relative my-2 group">
+      <pre className="bg-surface border border-border rounded-md p-3 pr-14 overflow-x-auto font-mono text-[12px] leading-relaxed text-text">
+        {lang && (
+          <div className="text-[10px] text-text-dim mb-1.5 uppercase tracking-wider">{lang}</div>
+        )}
+        <code>{code}</code>
+      </pre>
+      <CopyButton text={code} />
+    </div>
+  );
+}
+
+function renderRichText(text: string): React.ReactNode {
+  const parts: React.ReactNode[] = [];
+  const fence = /```(\w*)\n([\s\S]*?)```/g;
+  let lastIdx = 0;
+  let match: RegExpExecArray | null;
+  let key = 0;
+  while ((match = fence.exec(text)) !== null) {
+    if (match.index > lastIdx) {
+      const chunk = text.slice(lastIdx, match.index);
+      parts.push(
+        <span
+          key={`t${key++}`}
+          dangerouslySetInnerHTML={{ __html: renderMarkdown(chunk) }}
+        />,
+      );
+    }
+    parts.push(<CodeBlock key={`c${key++}`} lang={match[1] || undefined} code={match[2]} />);
+    lastIdx = match.index + match[0].length;
+  }
+  if (lastIdx < text.length) {
+    const chunk = text.slice(lastIdx);
+    parts.push(
+      <span
+        key={`t${key++}`}
+        dangerouslySetInnerHTML={{ __html: renderMarkdown(chunk) }}
+      />,
+    );
+  }
+  return parts;
+}
 
 function ToolUseBlock({ block }: { block: ContentBlock }) {
   const tool = block.tool_name || "?";
@@ -14,9 +81,9 @@ function ToolUseBlock({ block }: { block: ContentBlock }) {
   else if (["Glob", "Grep"].includes(tool)) cmd = input.pattern || "";
 
   return (
-    <div className="flex items-center gap-1.5 my-1 px-2.5 py-1.5 bg-surface-2 border border-border rounded-md font-mono text-xs overflow-hidden">
-      <span className="text-cyan font-semibold shrink-0">{tool}</span>
-      <span className="text-text-dim truncate">{cmd}</span>
+    <div className="flex items-center gap-1.5 my-0.5 pl-2 border-l border-border/60 font-mono text-[11px] text-text-dim overflow-hidden">
+      <span className="shrink-0 opacity-70">{tool}</span>
+      <span className="truncate">{cmd}</span>
     </div>
   );
 }
@@ -27,21 +94,15 @@ function ToolResultBlock({ block }: { block: ContentBlock }) {
   if (!content && !isErr) return null;
 
   const len = typeof content === "string" ? content.length : 0;
-  const truncated =
-    typeof content === "string"
-      ? content.length > 800
-        ? content.slice(0, 800) + "..."
-        : content
-      : String(content);
+  const text = typeof content === "string" ? content : String(content);
+  const truncated = text.length > 800 ? text.slice(0, 800) + "..." : text;
 
   return (
-    <details
-      className={`my-0.5 text-xs ${isErr ? "text-red" : ""}`}
-    >
+    <details className={`my-0.5 pl-2 border-l border-border/60 text-[11px] ${isErr ? "text-red" : ""}`}>
       <summary
-        className={`cursor-pointer font-mono text-[11px] ${isErr ? "text-red" : "text-text-dim"} hover:text-text`}
+        className={`cursor-pointer font-mono ${isErr ? "text-red" : "text-text-dim/80"} hover:text-text select-none`}
       >
-        {isErr ? "Error" : "Output"} ({fmtNum(len)} chars)
+        {isErr ? "error" : "output"} · {fmtNum(len)} chars
       </summary>
       <pre
         className={`mt-1 p-2 rounded font-mono text-[11px] leading-snug whitespace-pre-wrap break-all max-h-[200px] overflow-y-auto ${
@@ -77,10 +138,9 @@ function ThinkingBlock({ block }: { block: ContentBlock }) {
 function TextBlock({ text }: { text: string }) {
   if (!text.trim()) return null;
   return (
-    <div
-      className="text-sm leading-relaxed whitespace-pre-wrap break-words [&_code]:bg-surface-3 [&_code]:px-1 [&_code]:py-px [&_code]:rounded [&_code]:font-mono [&_code]:text-xs [&_pre]:bg-surface-2 [&_pre]:border [&_pre]:border-border [&_pre]:rounded-md [&_pre]:p-2.5 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:font-mono [&_pre]:text-xs [&_pre]:leading-relaxed [&_pre_code]:bg-transparent [&_pre_code]:p-0"
-      dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }}
-    />
+    <div className="text-sm leading-relaxed whitespace-pre-wrap break-words [&_code]:bg-surface-3 [&_code]:px-1 [&_code]:py-px [&_code]:rounded [&_code]:font-mono [&_code]:text-xs">
+      {renderRichText(text)}
+    </div>
   );
 }
 
@@ -148,16 +208,17 @@ function MessageRow({ msg }: { msg: Message }) {
 
 interface Props {
   messages: Message[];
+  working?: boolean;
 }
 
-export default function MessageView({ messages }: Props) {
+export default function MessageView({ messages, working }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length]);
+  }, [messages.length, working]);
 
-  if (messages.length === 0) {
+  if (messages.length === 0 && !working) {
     return (
       <div className="flex-1 flex items-center justify-center text-text-dim text-sm">
         No messages yet
@@ -170,6 +231,16 @@ export default function MessageView({ messages }: Props) {
       {messages.map((msg, i) => (
         <MessageRow key={i} msg={msg} />
       ))}
+      {working && (
+        <div className="flex items-center gap-2 py-2 text-[12px] text-text-dim animate-[fadeIn_0.2s_ease]">
+          <span className="flex gap-1">
+            <span className="w-1 h-1 rounded-full bg-text-dim animate-[pulse_1.2s_ease-in-out_infinite]" />
+            <span className="w-1 h-1 rounded-full bg-text-dim animate-[pulse_1.2s_ease-in-out_0.2s_infinite]" />
+            <span className="w-1 h-1 rounded-full bg-text-dim animate-[pulse_1.2s_ease-in-out_0.4s_infinite]" />
+          </span>
+          <span className="italic">thinking</span>
+        </div>
+      )}
       <div ref={bottomRef} />
     </div>
   );

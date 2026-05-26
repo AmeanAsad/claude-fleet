@@ -59,12 +59,10 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
         if (!cancelled) setMessages((prev) => [...prev, msg]);
       },
       (data) => {
-        if (!cancelled && data.idle !== undefined) {
-          setDetail((prev) =>
-            prev
-              ? { ...prev, status: data.idle ? "idle" : "working" }
-              : prev,
-          );
+        if (cancelled) return;
+        const next = (data.status ?? (data.idle !== undefined ? (data.idle ? "idle" : "working") : undefined)) as string | undefined;
+        if (next) {
+          setDetail((prev) => (prev ? { ...prev, status: next } : prev));
         }
       },
     );
@@ -169,11 +167,6 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
           {status}
         </div>
         <div className="flex-1" />
-        {detail && (detail.message_count ?? 0) > 0 && (
-          <div className="text-[11px] text-text-dim font-mono">
-            {detail.message_count} msgs
-          </div>
-        )}
         <button
           onClick={() => setShowInfo(!showInfo)}
           className="text-xs px-2.5 py-1 rounded-md border border-border text-text-dim hover:border-text hover:text-text transition-all cursor-pointer"
@@ -217,7 +210,7 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
       )}
 
       {/* Messages */}
-      <MessageView messages={messages} />
+      <MessageView messages={messages} working={status === "working"} />
 
       {/* Prompt */}
       <PromptBar onSend={handleSend} />
