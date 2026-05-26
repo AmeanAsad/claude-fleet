@@ -74,11 +74,6 @@ PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
         "ssh_user": "vscode",
         "instance_type": "docker",
     },
-    "external": {
-        "region": "",
-        "ssh_user": "",
-        "instance_type": "",
-    },
 }
 
 

@@ -646,21 +646,16 @@ def tui():
 def join(
     server_url: str = typer.Argument(..., help="Server URL (e.g. http://my-server:8420)"),
     token: Optional[str] = typer.Option(None, "--token", "-t", help="Server token"),
-    name: Optional[str] = typer.Option(None, "--name", "-n", help="Machine name (defaults to hostname)"),
     api_key: Optional[str] = typer.Option(None, "--api-key", help="Anthropic API key"),
     model: str = typer.Option("claude-opus-4-6", "--model", "-m", help="Default model"),
     skip_bootstrap: bool = typer.Option(False, "--skip-bootstrap", help="Skip system deps install"),
 ):
-    """Join the fleet — bootstrap this machine and register with the server.
+    """Join the fleet — save server config and optionally bootstrap this machine.
 
-    Installs system deps, Claude Code CLI, and relay dependencies, then
-    connects to the server and listens for spawn/kill commands.
+    Saves the server URL, token, and API key to ~/.cfleet/config.yml.
+    Use `cfleet agent <name>` afterwards to start a worker.
     """
-    import asyncio
-    import platform
-    from cfleet.config import FleetConfig, FLEET_DIR, CONFIG_PATH
-
-    machine_name = name or platform.node()
+    from cfleet.config import FleetConfig, FLEET_DIR
 
     try:
         cfg = FleetConfig.load()
@@ -685,22 +680,8 @@ def join(
     cfg.model = model
     cfg.save()
 
-    effective_token = token or cfg.server.token
-    if not effective_token:
-        console.print("[red]No server token. Pass --token or set it in config.yml[/red]")
-        raise typer.Exit(1)
-
-    console.print(f"Joining fleet as [bold]{machine_name}[/bold] → {server_url}")
-
-    from cfleet.machine_agent import MachineAgent
-    agent = MachineAgent(
-        server_url=server_url,
-        token=effective_token,
-        machine_name=machine_name,
-        api_key=effective_api_key,
-        model=model,
-    )
-    asyncio.run(agent.run())
+    console.print(f"[green]Joined fleet at {server_url}[/green]")
+    console.print("[dim]Run 'cfleet agent <name>' to start a worker.[/dim]")
 
 
 # --------------------------------------------------------------------------
@@ -711,19 +692,23 @@ def join(
 def agent(
     name: str = typer.Argument(..., help="Worker name"),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Override model"),
-    cwd: Optional[str] = typer.Option(None, "--cwd", help="Working directory (skip workspace provisioning)"),
-    port: int = typer.Option(8421, "--port", "-p", help="Relay HTTP port"),
+    cwd: Optional[str] = typer.Option(None, "--cwd", help="Working directory"),
     server_url: Optional[str] = typer.Option(None, "--server-url", "-s", help="Server URL (reads from config if omitted)"),
     token: Optional[str] = typer.Option(None, "--token", "-t", help="Server token"),
 ):
-    """Start a local worker and register it with the fleet server.
+    """Start a Claude Code TUI session registered with the fleet.
 
-    Run this on a machine that has already joined the fleet (via `cfleet join`)
-    or has cfleet installed. The worker appears in the dashboard and can receive
-    prompts from anywhere.
+    Wraps the `claude` CLI — launches the real TUI with your terminal attached.
+    A background WebSocket connection registers this session with the server
+    so the dashboard can view messages and send prompts.
     """
-    import asyncio
+    import json
     import platform
+    import subprocess
+    import threading
+    import time
+    import uuid
+    from pathlib import Path
     from cfleet.config import FleetConfig
 
     try:
@@ -736,6 +721,7 @@ def agent(
     effective_server_url = server_url or cfg.server.url
     effective_token = token or cfg.server.token
     machine_name = platform.node()
+    workspace = cwd or os.getcwd()
 
     if not effective_server_url:
         console.print("[red]No server URL. Pass --server-url or run 'cfleet join' first.[/red]")
@@ -745,56 +731,271 @@ def agent(
         console.print("[red]No server token. Pass --token or set it in config.yml[/red]")
         raise typer.Exit(1)
 
-    workspace = cwd
-    if not workspace:
-        from cfleet.provisioner import local_provision_worker
-        repo_configs = [r.model_dump() for r in cfg.repos]
-        workspace = local_provision_worker(
-            worker_name=name,
-            relay_port=port,
-            model=effective_model,
-            repos=repo_configs,
-            fleet_config=cfg,
-        )
+    api_key = cfg.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+    if api_key:
+        os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
+
+    session_id = str(uuid.uuid4())
+    claude_cmd = ["claude", "--session-id", session_id, "--model", effective_model, "--name", name]
+
+    # Derive session JSONL path: ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl
+    encoded_cwd = workspace.replace("/", "-")
+    jsonl_path = str(Path.home() / ".claude" / "projects" / encoded_cwd / f"{session_id}.jsonl")
 
     console.print(f"Starting worker [bold]{name}[/bold] on {machine_name}")
-    console.print(f"  Server:    {effective_server_url}")
-    console.print(f"  Workspace: {workspace}")
-    console.print(f"  Model:     {effective_model}")
-    console.print(f"  Port:      {port}")
-    console.print("[dim]Press Ctrl+C to stop.[/dim]")
+    console.print(f"  Server:  {effective_server_url}")
+    console.print(f"  CWD:     {workspace}")
+    console.print(f"  Model:   {effective_model}")
+    console.print(f"  Session: {session_id}")
 
-    from cfleet.worker_relay import create_relay_app, _ws_client_loop, _scrubber, state as relay_state
+    # Background WebSocket client for server registration
+    stop_event = threading.Event()
 
-    _scrubber.load_from_env_file()
-    if effective_token:
-        _scrubber.add_secret("CFLEET_TOKEN", effective_token)
-    for env_key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_API_KEY"):
-        val = os.environ.get(env_key, "") or cfg.anthropic_api_key
-        if val:
-            _scrubber.add_secret(env_key, val)
-            os.environ.setdefault(env_key, val)
+    def _ws_background():
+        import asyncio
+        asyncio.run(_agent_ws_loop(
+            server_url=effective_server_url,
+            token=effective_token,
+            worker_name=name,
+            machine_name=machine_name,
+            model=effective_model,
+            session_id=session_id,
+            jsonl_path=jsonl_path,
+            stop_event=stop_event,
+        ))
 
-    relay_app = create_relay_app(model=effective_model, cwd=workspace)
-
-    async def _run():
-        import uvicorn as _uv
-        config = _uv.Config(relay_app, host="127.0.0.1", port=port, log_level="warning")
-        server = _uv.Server(config)
-
-        ws_task = asyncio.create_task(
-            _ws_client_loop(effective_server_url, effective_token, name, machine_name, effective_model, workspace)
-        )
-
-        try:
-            await server.serve()
-        finally:
-            ws_task.cancel()
+    ws_thread = threading.Thread(target=_ws_background, daemon=True)
+    ws_thread.start()
 
     try:
-        asyncio.run(_run())
+        proc = subprocess.run(claude_cmd, cwd=workspace)
     except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        ws_thread.join(timeout=5)
         console.print(f"\n[dim]Worker {name} stopped.[/dim]")
+
+
+async def _agent_ws_loop(
+    server_url: str,
+    token: str,
+    worker_name: str,
+    machine_name: str,
+    model: str,
+    session_id: str,
+    jsonl_path: str,
+    stop_event,
+):
+    """Background WebSocket client that registers with the server and handles commands."""
+    import asyncio
+    import json
+    import websockets
+    from pathlib import Path
+
+    ws_url = server_url.replace("http://", "ws://").replace("https://", "wss://") + "/ws"
+    backoff = 1.0
+
+    while not stop_event.is_set():
+        try:
+            async with websockets.connect(ws_url) as ws:
+                await ws.send(json.dumps({
+                    "type": "register",
+                    "token": token,
+                    "worker_name": worker_name,
+                    "machine_name": machine_name,
+                }))
+
+                reg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                if reg.get("type") != "registered":
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 30)
+                    continue
+
+                backoff = 1.0
+
+                heartbeat_task = asyncio.create_task(_agent_heartbeat(ws, stop_event))
+
+                try:
+                    while not stop_event.is_set():
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                        except asyncio.TimeoutError:
+                            continue
+                        data = json.loads(raw)
+                        await _handle_server_command(ws, data, jsonl_path, worker_name, model, session_id)
+                finally:
+                    heartbeat_task.cancel()
+
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            if stop_event.is_set():
+                break
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+
+async def _agent_heartbeat(ws, stop_event):
+    import json
+    while not stop_event.is_set():
+        await asyncio.sleep(30)
+        try:
+            await ws.send(json.dumps({"type": "heartbeat"}))
+        except Exception:
+            break
+
+
+async def _handle_server_command(ws, data: dict, jsonl_path: str, worker_name: str, model: str, session_id: str):
+    """Handle commands from the server (ask, messages, status, interrupt)."""
+    import json
+    from pathlib import Path
+
+    msg_type = data.get("type")
+    request_id = data.get("request_id", "")
+
+    if msg_type == "heartbeat_ack":
+        return
+
+    if msg_type == "ask":
+        prompt = data.get("prompt", "")
+        # Write queue-operation to the session JSONL so the running claude TUI picks it up
+        from datetime import datetime, timezone
+        queue_line = json.dumps({
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+            "sessionId": session_id,
+            "content": prompt,
+        })
+        p = Path(jsonl_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a") as f:
+            f.write(queue_line + "\n")
+
+        await ws.send(json.dumps({
+            "type": "response",
+            "request_id": request_id,
+            "data": {"ok": True},
+        }))
+
+    elif msg_type == "messages":
+        offset = data.get("offset", 0)
+        limit = data.get("limit", 200)
+        messages = _read_session_messages(jsonl_path, offset, limit)
+        await ws.send(json.dumps({
+            "type": "response",
+            "request_id": request_id,
+            "data": {"messages": messages},
+        }))
+
+    elif msg_type == "status":
+        await ws.send(json.dumps({
+            "type": "response",
+            "request_id": request_id,
+            "data": {
+                "worker_name": worker_name,
+                "model": model,
+                "session_id": session_id,
+                "message_count": len(_read_session_messages(jsonl_path, 0, 10000)),
+            },
+        }))
+
+    elif msg_type == "interrupt":
+        # Find the claude process and send SIGINT
+        import signal
+        try:
+            session_dir = Path.home() / ".claude" / "sessions"
+            for sf in session_dir.iterdir():
+                try:
+                    meta = json.loads(sf.read_text())
+                    if meta.get("sessionId") == session_id:
+                        os.kill(meta["pid"], signal.SIGINT)
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        await ws.send(json.dumps({
+            "type": "response",
+            "request_id": request_id,
+            "data": {"ok": True},
+        }))
+
+
+def _read_session_messages(jsonl_path: str, offset: int = 0, limit: int = 200) -> list[dict]:
+    """Read user/assistant messages from a Claude session JSONL file.
+
+    Transforms raw JSONL entries into the format the web dashboard expects.
+    """
+    import json
+    from pathlib import Path
+
+    p = Path(jsonl_path)
+    if not p.exists():
+        return []
+
+    messages = []
+    for line in p.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        entry_type = entry.get("type")
+        if entry_type not in ("user", "assistant"):
+            continue
+
+        msg = entry.get("message", {})
+        role = msg.get("role", entry_type)
+        raw_content = msg.get("content", "")
+        timestamp = entry.get("timestamp", "")
+
+        # Transform content to dashboard ContentBlock format
+        if isinstance(raw_content, str):
+            content = [{"type": "TextBlock", "text": raw_content}]
+        elif isinstance(raw_content, list):
+            content = []
+            for block in raw_content:
+                if not isinstance(block, dict):
+                    continue
+                bt = block.get("type", "")
+                if bt == "text":
+                    content.append({"type": "TextBlock", "text": block.get("text", "")})
+                elif bt == "thinking":
+                    content.append({"type": "ThinkingBlock", "thinking": block.get("thinking", "")})
+                elif bt == "tool_use":
+                    content.append({
+                        "type": "ToolUseBlock",
+                        "tool_name": block.get("name", ""),
+                        "tool_input": block.get("input", {}),
+                        "tool_id": block.get("id", ""),
+                    })
+                elif bt == "tool_result":
+                    result_content = block.get("content", "")
+                    if isinstance(result_content, list):
+                        result_content = "\n".join(
+                            c.get("text", "") for c in result_content if isinstance(c, dict)
+                        )
+                    content.append({
+                        "type": "ToolResultBlock",
+                        "content": result_content,
+                        "is_error": block.get("is_error", False),
+                    })
+        else:
+            content = []
+
+        messages.append({
+            "type": "UserPrompt" if role == "user" else "AssistantMessage",
+            "role": role,
+            "timestamp": timestamp,
+            "content": content,
+            "model": msg.get("model", ""),
+        })
+
+    return messages[offset : offset + limit]
 
 
 # --------------------------------------------------------------------------

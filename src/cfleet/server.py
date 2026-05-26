@@ -513,7 +513,6 @@ def create_server_app() -> FastAPI:
                 from cfleet.config import MachineState
                 machine = MachineState(
                     name=machine_name,
-                    provider="external",
                     hostname=system_info.get("hostname", ""),
                     os_info=system_info.get("os", ""),
                     status="ready",
@@ -521,7 +520,6 @@ def create_server_app() -> FastAPI:
                 state.add_machine(machine)
             else:
                 machine = state.machines[machine_name]
-                machine.provider = "external"
                 machine.hostname = system_info.get("hostname", "")
                 machine.os_info = system_info.get("os", "")
                 machine.status = "ready"
@@ -629,7 +627,7 @@ def create_server_app() -> FastAPI:
         result = []
         for m in state.machines.values():
             d = m.model_dump()
-            d["connected"] = m.name in connected_machines if m.provider == "external" else None
+            d["connected"] = m.name in connected_machines
             result.append(d)
         return result
 
