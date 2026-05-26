@@ -145,7 +145,8 @@ class MachineAgent:
         worker_name = data.get("worker_name", "")
         model = data.get("model", self.model)
         repos = data.get("repos", [])
-        cwd = data.get("cwd", "")
+        raw_cwd = data.get("cwd", "")
+        cwd = os.path.abspath(os.path.expanduser(raw_cwd)) if raw_cwd else ""
 
         if worker_name in self.workers:
             await ws.send(json.dumps({

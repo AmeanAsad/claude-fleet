@@ -375,6 +375,7 @@ def machine_ssh(
 def spawn(
     name: str = typer.Argument(..., help="Worker name"),
     machine: Optional[str] = typer.Option(None, "--machine", "-M", help="Machine to spawn on (auto-creates if omitted)"),
+    cwd: Optional[str] = typer.Option(None, "--cwd", help="Working directory on the target machine (external only)"),
     repo: list[str] = typer.Option([], "--repo", "-r", help="Repos to clone (repeatable, defaults to all)"),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Override default model"),
     vm_type: Optional[str] = typer.Option(None, "--type", help="VM type for auto-created machine: regular, snp, or tdx"),
@@ -403,6 +404,7 @@ def spawn(
         instance_type=instance_type,
         region=region,
         provider=provider,
+        cwd=cwd,
     )
 
     if gh:

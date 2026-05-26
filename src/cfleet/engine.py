@@ -318,6 +318,7 @@ class FleetEngine:
         vm_type: VMType | None = None,
         instance_type: str | None = None,
         region: str | None = None,
+        cwd: str | None = None,
     ) -> WorkerState:
         """Spawn a new worker on a machine. Auto-creates machine if needed."""
         if name in self.state.workers:
@@ -361,7 +362,7 @@ class FleetEngine:
         repo_configs = [r.model_dump() for r in self.config.repos if r.name in effective_repos]
 
         if machine.provider == "external":
-            self._spawn_worker_external(worker, machine, effective_model, repo_configs)
+            self._spawn_worker_external(worker, machine, effective_model, repo_configs, cwd=cwd)
         elif machine.provider == "devcontainer":
             self._spawn_worker_devcontainer(worker, machine, effective_model, repo_configs)
         else:
@@ -392,14 +393,18 @@ class FleetEngine:
         self._save_state()
 
     def _spawn_worker_external(
-        self, worker: WorkerState, machine: MachineState, model: str, repos: list[dict]
+        self, worker: WorkerState, machine: MachineState, model: str, repos: list[dict],
+        cwd: str | None = None,
     ) -> None:
         console.print(f"Sending spawn to external machine [bold]{machine.name}[/bold]...")
-        result = self._api_post(f"/api/machines/{machine.name}/spawn", {
+        payload: dict = {
             "worker_name": worker.name,
             "model": model,
             "repos": repos,
-        })
+        }
+        if cwd:
+            payload["cwd"] = cwd
+        result = self._api_post(f"/api/machines/{machine.name}/spawn", payload)
         if "error" in result:
             raise RuntimeError(f"Remote spawn failed: {result['error']}")
 

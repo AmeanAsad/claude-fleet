@@ -226,6 +226,7 @@ class SpawnRequest(BaseModel):
     instance_type: str | None = None
     repos: list[str] | None = None
     region: str | None = None
+    cwd: str | None = None  # working dir on external machines
 
 
 class AskRequest(BaseModel):
@@ -810,6 +811,7 @@ def create_server_app() -> FastAPI:
                     instance_type=req.instance_type,
                     region=req.region,
                     provider=req.provider,
+                    cwd=req.cwd,
                 ),
                 cleanup_worker=req.name,
             )
