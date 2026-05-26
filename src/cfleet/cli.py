@@ -66,6 +66,69 @@ def _set_worker_gh_level(worker_name: str, level: str) -> None:
         console.print("[dim]GitHub access revoked. Cached tokens expire within 1 hour.[/dim]")
 
 
+def _wire_local_git_credential_helper(worker_name: str, cwd: str) -> None:
+    """Configure git in the worker's cwd to use cfleet-gh-token for github.com.
+
+    Writes a worker-scoped fleet.gitconfig that git includes, so credentials
+    flow automatically when git/gh/claude in that directory tries to talk to
+    github. Idempotent — safe to re-run.
+    """
+    import shutil
+    import subprocess
+    from cfleet.config import FleetConfig
+
+    helper_path = shutil.which("cfleet-gh-token")
+    if not helper_path:
+        console.print(
+            "[yellow]cfleet-gh-token not on PATH — install hasn't refreshed yet. "
+            "Reinstall cfleet (e.g. `uv tool install --force --reinstall .`).[/yellow]"
+        )
+        return
+
+    cfg = FleetConfig.load()
+    server_url = cfg.server.url
+    fleet_token = cfg.server.token
+    if not server_url or not fleet_token:
+        return
+
+    # Add the helper to the user's GLOBAL gitconfig for github.com. Git
+    # supports stacked helpers, so any existing helper (osxkeychain etc.)
+    # still runs first — ours only fires if the others didn't supply a
+    # credential. This is necessary because `git clone` outside an existing
+    # repo doesn't honor includeIf-scoped config.
+    try:
+        # Check if our helper is already configured to avoid duplicate adds.
+        existing = subprocess.run(
+            ["git", "config", "--global", "--get-all", "credential.https://github.com.helper"],
+            capture_output=True,
+            text=True,
+        )
+        helpers = existing.stdout.splitlines() if existing.returncode == 0 else []
+        if helper_path not in helpers:
+            subprocess.run(
+                ["git", "config", "--global", "--add", "credential.https://github.com.helper", helper_path],
+                check=False,
+                capture_output=True,
+            )
+        subprocess.run(
+            ["git", "config", "--global", "credential.https://github.com.useHttpPath", "true"],
+            check=False,
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        console.print("[yellow]git is not installed; skipping credential helper wiring.[/yellow]")
+        return
+
+    console.print(
+        f"[dim]Wired git credential helper for {worker_name} in {cwd} "
+        f"(helper: {helper_path}).[/dim]"
+    )
+    console.print(
+        f"[dim]Worker process must have CFLEET_SERVER_URL/CFLEET_TOKEN/CFLEET_WORKER_NAME set "
+        f"— `cfleet agent` does this automatically.[/dim]"
+    )
+
+
 def _warn_branch_protection(repos: list[str]) -> None:
     """Print warnings for repos missing branch protection. Best-effort, never raises."""
     from cfleet.config import FleetConfig
@@ -424,10 +487,10 @@ def interrupt(
 # --------------------------------------------------------------------------
 
 @app.command()
-def attach(
+def shell(
     name: str = typer.Argument(..., help="Worker name"),
 ):
-    """Attach to a worker's machine shell for debugging. Replaces current process."""
+    """Open a debug shell on a worker's underlying machine (SSH/docker exec)."""
     engine = _engine()
     engine.attach(name)
 
@@ -688,6 +751,18 @@ def join(
 # cfleet agent
 # --------------------------------------------------------------------------
 
+def _detect_ssh_target() -> tuple[str, str]:
+    """Best-effort detection of an SSH host/user other machines could use to reach this one.
+
+    Returns ("", "") when no usable target is detected (e.g. laptop behind NAT).
+    `cfleet agent --ssh-host` lets the user override.
+    """
+    import getpass
+    user = os.environ.get("USER") or getpass.getuser() or ""
+    host = os.environ.get("CFLEET_SSH_HOST", "")
+    return host, user
+
+
 @app.command()
 def agent(
     name: str = typer.Argument(..., help="Worker name"),
@@ -695,18 +770,17 @@ def agent(
     cwd: Optional[str] = typer.Option(None, "--cwd", help="Working directory"),
     server_url: Optional[str] = typer.Option(None, "--server-url", "-s", help="Server URL (reads from config if omitted)"),
     token: Optional[str] = typer.Option(None, "--token", "-t", help="Server token"),
+    ssh_host: Optional[str] = typer.Option(None, "--ssh-host", help="Public SSH target (host[:port]) others can reach this machine on"),
+    ssh_user: Optional[str] = typer.Option(None, "--ssh-user", help="SSH login user (defaults to $USER)"),
 ):
-    """Start a Claude Code TUI session registered with the fleet.
+    """Start a headless Claude Code worker registered with the fleet.
 
-    Wraps the `claude` CLI — launches the real TUI with your terminal attached.
-    A background WebSocket connection registers this session with the server
-    so the dashboard can view messages and send prompts.
+    Runs the Claude Code SDK in-process and connects to the fleet server via
+    WebSocket. The dashboard is the primary UI — prompts sent there execute
+    here. Use `cfleet attach <name>` to drop into a TUI on the same session.
     """
-    import json
+    import asyncio
     import platform
-    import subprocess
-    import threading
-    import time
     import uuid
     from pathlib import Path
     from cfleet.config import FleetConfig
@@ -731,28 +805,38 @@ def agent(
         console.print("[red]No server token. Pass --token or set it in config.yml[/red]")
         raise typer.Exit(1)
 
+    if not Path(workspace).exists():
+        console.print(f"[red]Working directory does not exist: {workspace}[/red]")
+        raise typer.Exit(1)
+
+    workspace = str(Path(workspace).resolve())
+
     api_key = cfg.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
     if api_key:
         os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
 
-    session_id = str(uuid.uuid4())
-    claude_cmd = ["claude", "--session-id", session_id, "--model", effective_model, "--name", name]
+    # Surface fleet identity to child processes (git's credential.helper, etc.)
+    os.environ["CFLEET_SERVER_URL"] = effective_server_url
+    os.environ["CFLEET_TOKEN"] = effective_token
+    os.environ["CFLEET_WORKER_NAME"] = name
 
-    # Derive session JSONL path: ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl
+    session_id = str(uuid.uuid4())
     encoded_cwd = workspace.replace("/", "-")
     jsonl_path = str(Path.home() / ".claude" / "projects" / encoded_cwd / f"{session_id}.jsonl")
+    lock_path = str(Path.home() / ".claude" / "projects" / encoded_cwd / f"{session_id}.lock")
 
-    console.print(f"Starting worker [bold]{name}[/bold] on {machine_name}")
+    console.print(f"Starting headless worker [bold]{name}[/bold] on {machine_name}")
     console.print(f"  Server:  {effective_server_url}")
     console.print(f"  CWD:     {workspace}")
     console.print(f"  Model:   {effective_model}")
     console.print(f"  Session: {session_id}")
+    console.print(f"[dim]Dashboard sends prompts here. `cfleet attach {name}` for a TUI on this session.[/dim]")
 
-    # Background WebSocket client for server registration
-    stop_event = threading.Event()
+    detected_host, detected_user = _detect_ssh_target()
+    effective_ssh_host = ssh_host if ssh_host is not None else detected_host
+    effective_ssh_user = ssh_user if ssh_user is not None else detected_user
 
-    def _ws_background():
-        import asyncio
+    try:
         asyncio.run(_agent_ws_loop(
             server_url=effective_server_url,
             token=effective_token,
@@ -761,20 +845,83 @@ def agent(
             model=effective_model,
             session_id=session_id,
             jsonl_path=jsonl_path,
-            stop_event=stop_event,
+            lock_path=lock_path,
+            cwd=workspace,
+            ssh_host=effective_ssh_host,
+            ssh_user=effective_ssh_user,
         ))
-
-    ws_thread = threading.Thread(target=_ws_background, daemon=True)
-    ws_thread.start()
-
-    try:
-        proc = subprocess.run(claude_cmd, cwd=workspace)
     except KeyboardInterrupt:
         pass
     finally:
-        stop_event.set()
-        ws_thread.join(timeout=5)
+        try:
+            Path(lock_path).unlink(missing_ok=True)
+        except Exception:
+            pass
         console.print(f"\n[dim]Worker {name} stopped.[/dim]")
+
+
+class _AgentRuntime:
+    """Per-process runtime state for `cfleet agent`."""
+
+    def __init__(self, session_id: str, jsonl_path: str, lock_path: str, model: str, cwd: str):
+        self.session_id = session_id
+        self.jsonl_path = jsonl_path
+        self.lock_path = lock_path
+        self.model = model
+        self.cwd = cwd
+        self.status: str = "idle"  # idle | working | paused
+        self.current_task = None
+        self.has_session = False  # set True once first SDK turn writes the JSONL
+        # JSONL byte offset already pushed by the SDK streamer. The tailer
+        # uses this to avoid re-pushing messages it produced.
+        self.sdk_pushed_offset: int = 0
+
+
+def _read_lock_owner(lock_path: str) -> Optional[str]:
+    import json
+    from pathlib import Path
+    p = Path(lock_path)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text()).get("owner")
+    except Exception:
+        return None
+
+
+def _write_lock(lock_path: str, owner: str) -> None:
+    import json
+    import os
+    from datetime import datetime, timezone
+    from pathlib import Path
+    p = Path(lock_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({
+        "owner": owner,
+        "pid": os.getpid(),
+        "since": datetime.now(timezone.utc).isoformat(),
+    }))
+
+
+def _release_lock_if_owner(lock_path: str, expected_owner: str, expected_pid: int, new_owner: str) -> bool:
+    """Flip the lock to `new_owner` only if it still matches expected owner+pid.
+
+    Returns True if we transitioned; False if the lock was stolen or replaced
+    by another process (in which case we leave it alone — they own it now).
+    """
+    import json
+    from pathlib import Path
+    p = Path(lock_path)
+    if not p.exists():
+        return False
+    try:
+        cur = json.loads(p.read_text())
+    except Exception:
+        return False
+    if cur.get("owner") != expected_owner or cur.get("pid") != expected_pid:
+        return False
+    _write_lock(lock_path, new_owner)
+    return True
 
 
 async def _agent_ws_loop(
@@ -785,18 +932,23 @@ async def _agent_ws_loop(
     model: str,
     session_id: str,
     jsonl_path: str,
-    stop_event,
+    lock_path: str,
+    cwd: str,
+    ssh_host: str = "",
+    ssh_user: str = "",
 ):
-    """Background WebSocket client that registers with the server and handles commands."""
+    """WebSocket client: registers, handles commands, runs SDK, tails JSONL."""
     import asyncio
     import json
     import websockets
-    from pathlib import Path
+
+    runtime = _AgentRuntime(session_id, jsonl_path, lock_path, model, cwd)
+    _write_lock(lock_path, "relay")
 
     ws_url = server_url.replace("http://", "ws://").replace("https://", "wss://") + "/ws"
     backoff = 1.0
 
-    while not stop_event.is_set():
+    while True:
         try:
             async with websockets.connect(ws_url) as ws:
                 await ws.send(json.dumps({
@@ -804,6 +956,11 @@ async def _agent_ws_loop(
                     "token": token,
                     "worker_name": worker_name,
                     "machine_name": machine_name,
+                    "session_id": session_id,
+                    "cwd": cwd,
+                    "model": model,
+                    "ssh_host": ssh_host,
+                    "ssh_user": ssh_user,
                 }))
 
                 reg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
@@ -813,32 +970,30 @@ async def _agent_ws_loop(
                     continue
 
                 backoff = 1.0
-
-                heartbeat_task = asyncio.create_task(_agent_heartbeat(ws, stop_event))
+                tasks = [
+                    asyncio.create_task(_agent_heartbeat(ws)),
+                    asyncio.create_task(_agent_jsonl_tailer(ws, runtime)),
+                ]
 
                 try:
-                    while not stop_event.is_set():
-                        try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
-                        except asyncio.TimeoutError:
-                            continue
+                    async for raw in ws:
                         data = json.loads(raw)
-                        await _handle_server_command(ws, data, jsonl_path, worker_name, model, session_id)
+                        await _handle_server_command(ws, data, runtime, worker_name)
                 finally:
-                    heartbeat_task.cancel()
+                    for t in tasks:
+                        t.cancel()
 
         except asyncio.CancelledError:
             break
         except Exception:
-            if stop_event.is_set():
-                break
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30)
 
 
-async def _agent_heartbeat(ws, stop_event):
+async def _agent_heartbeat(ws):
+    import asyncio
     import json
-    while not stop_event.is_set():
+    while True:
         await asyncio.sleep(30)
         try:
             await ws.send(json.dumps({"type": "heartbeat"}))
@@ -846,10 +1001,60 @@ async def _agent_heartbeat(ws, stop_event):
             break
 
 
-async def _handle_server_command(ws, data: dict, jsonl_path: str, worker_name: str, model: str, session_id: str):
-    """Handle commands from the server (ask, messages, status, interrupt)."""
+async def _agent_jsonl_tailer(ws, runtime: "_AgentRuntime"):
+    """Tail the session JSONL and push new user/assistant entries to the server.
+
+    The SDK runner (`_agent_run_sdk`) pushes its own events live, so during an
+    active SDK turn we suppress the tailer to avoid double-pushing the same
+    messages. At all other times (TUI is attached, or relay is idle between
+    turns) we forward any new JSONL entries — that covers TUI-authored writes
+    even if the TUI detaches between our poll and the next tick.
+    """
+    import asyncio
     import json
     from pathlib import Path
+
+    p = Path(runtime.jsonl_path)
+    last_size = 0
+    while True:
+        try:
+            if p.exists():
+                size = p.stat().st_size
+                # Floor reads at the offset the SDK has already pushed live.
+                # This prevents double-pushing when JSONL writes lag the SDK's
+                # event stream, while still catching TUI-authored writes after
+                # detach (sdk_pushed_offset stays put while no SDK turn runs).
+                floor = max(last_size, runtime.sdk_pushed_offset)
+                if size > floor:
+                    with open(p, "r") as f:
+                        f.seek(floor)
+                        chunk = f.read()
+                    last_size = size
+                    for line in chunk.splitlines():
+                        if not line.strip():
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        msg = _jsonl_entry_to_message(entry)
+                        if msg is None:
+                            continue
+                        try:
+                            await ws.send(json.dumps({"type": "event", "data": msg}))
+                        except Exception:
+                            return
+            await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            await asyncio.sleep(2.0)
+
+
+async def _handle_server_command(ws, data: dict, runtime: "_AgentRuntime", worker_name: str):
+    """Handle commands from the server: ask, messages, status, interrupt."""
+    import asyncio
+    import json
 
     msg_type = data.get("type")
     request_id = data.get("request_id", "")
@@ -859,75 +1064,223 @@ async def _handle_server_command(ws, data: dict, jsonl_path: str, worker_name: s
 
     if msg_type == "ask":
         prompt = data.get("prompt", "")
-        # Write queue-operation to the session JSONL so the running claude TUI picks it up
-        from datetime import datetime, timezone
-        queue_line = json.dumps({
-            "type": "queue-operation",
-            "operation": "enqueue",
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-            "sessionId": session_id,
-            "content": prompt,
-        })
-        p = Path(jsonl_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a") as f:
-            f.write(queue_line + "\n")
+        owner = _read_lock_owner(runtime.lock_path)
+        if owner == "tui":
+            await ws.send(json.dumps({
+                "type": "response",
+                "request_id": request_id,
+                "data": {"error": "TUI is attached; detach to send from dashboard"},
+            }))
+            return
 
+        if runtime.status == "working":
+            await ws.send(json.dumps({
+                "type": "response",
+                "request_id": request_id,
+                "data": {"error": "Agent is already working"},
+            }))
+            return
+
+        runtime.current_task = asyncio.create_task(_agent_run_sdk(ws, runtime, prompt))
         await ws.send(json.dumps({
             "type": "response",
             "request_id": request_id,
-            "data": {"ok": True},
+            "data": {"ok": True, "status": "working"},
         }))
+        await ws.send(json.dumps({"type": "status_update", "status": "working"}))
+
+        async def _notify_done(task, _ws=ws, _runtime=runtime):
+            try:
+                await task
+            except Exception:
+                pass
+            try:
+                await _ws.send(json.dumps({"type": "status_update", "status": _runtime.status}))
+            except Exception:
+                pass
+
+        asyncio.create_task(_notify_done(runtime.current_task))
 
     elif msg_type == "messages":
         offset = data.get("offset", 0)
         limit = data.get("limit", 200)
-        messages = _read_session_messages(jsonl_path, offset, limit)
+        messages = _read_session_messages(runtime.jsonl_path, offset, limit)
         await ws.send(json.dumps({
             "type": "response",
             "request_id": request_id,
-            "data": {"messages": messages},
+            "data": {"messages": messages, "total": len(messages), "offset": offset},
         }))
 
     elif msg_type == "status":
+        all_msgs = _read_session_messages(runtime.jsonl_path, 0, 100000)
         await ws.send(json.dumps({
             "type": "response",
             "request_id": request_id,
             "data": {
                 "worker_name": worker_name,
-                "model": model,
-                "session_id": session_id,
-                "message_count": len(_read_session_messages(jsonl_path, 0, 10000)),
+                "model": runtime.model,
+                "session_id": runtime.session_id,
+                "status": runtime.status,
+                "lock_owner": _read_lock_owner(runtime.lock_path),
+                "message_count": len(all_msgs),
             },
         }))
 
     elif msg_type == "interrupt":
-        # Find the claude process and send SIGINT
-        import signal
-        try:
-            session_dir = Path.home() / ".claude" / "sessions"
-            for sf in session_dir.iterdir():
+        if runtime.current_task and not runtime.current_task.done():
+            runtime.current_task.cancel()
+            runtime.status = "idle"
+            await ws.send(json.dumps({
+                "type": "response",
+                "request_id": request_id,
+                "data": {"ok": True, "status": "interrupted"},
+            }))
+            try:
+                await ws.send(json.dumps({"type": "status_update", "status": "idle"}))
+            except Exception:
+                pass
+        else:
+            await ws.send(json.dumps({
+                "type": "response",
+                "request_id": request_id,
+                "data": {"ok": True, "status": "not_running"},
+            }))
+
+
+async def _agent_run_sdk(ws, runtime: "_AgentRuntime", prompt: str) -> None:
+    """Run a single SDK turn against the worker's session.
+
+    Streams each SDK message to the dashboard via WebSocket events as soon as
+    it arrives. The JSONL tailer is a backstop and a way to pick up
+    TUI-authored turns; this is the primary live-update path for SDK turns.
+    """
+    import asyncio
+    import json
+    import sys
+    import traceback
+    from claude_code_sdk import query, ClaudeCodeOptions
+    from cfleet.worker_relay import _serialize_message
+
+    runtime.status = "working"
+
+    try:
+        kwargs = dict(
+            model=runtime.model,
+            cwd=runtime.cwd,
+            permission_mode="bypassPermissions",
+            allowed_tools=["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "WebFetch"],
+        )
+        if runtime.has_session:
+            kwargs["resume"] = runtime.session_id
+        else:
+            kwargs["extra_args"] = {"session-id": runtime.session_id}
+        options = ClaudeCodeOptions(**kwargs)
+
+        async for msg in query(prompt=prompt, options=options):
+            serialized = _serialize_message(msg)
+            role = serialized.get("role", "")
+            content = serialized.get("content") or []
+
+            if role == "assistant" and content:
+                serialized["type"] = "AssistantMessage"
                 try:
-                    meta = json.loads(sf.read_text())
-                    if meta.get("sessionId") == session_id:
-                        os.kill(meta["pid"], signal.SIGINT)
-                        break
+                    await ws.send(json.dumps({"type": "event", "data": serialized}))
                 except Exception:
-                    continue
+                    pass
+            elif role == "user" and content:
+                # The SDK emits UserMessage only for tool results — the original
+                # user prompt comes from the dashboard's optimistic add. Skip
+                # any UserMessage that doesn't contain tool results.
+                has_tool_result = any(
+                    isinstance(b, dict) and b.get("type") == "ToolResultBlock"
+                    for b in content
+                )
+                if has_tool_result:
+                    serialized["type"] = "UserPrompt"
+                    try:
+                        await ws.send(json.dumps({"type": "event", "data": serialized}))
+                    except Exception:
+                        pass
+
+        runtime.has_session = True
+        runtime.status = "idle"
+    except asyncio.CancelledError:
+        runtime.status = "idle"
+        raise
+    except Exception as e:
+        runtime.status = "errored"
+        print(f"[cfleet agent] SDK error: {e}", file=sys.stderr)
+        traceback.print_exc()
+    finally:
+        # Move the tailer's floor past anything the SDK already pushed so we
+        # don't double up when the JSONL eventually catches up to disk.
+        try:
+            from pathlib import Path as _P
+            jp = _P(runtime.jsonl_path)
+            if jp.exists():
+                runtime.sdk_pushed_offset = jp.stat().st_size
         except Exception:
             pass
-        await ws.send(json.dumps({
-            "type": "response",
-            "request_id": request_id,
-            "data": {"ok": True},
-        }))
+
+
+def _jsonl_entry_to_message(entry: dict) -> Optional[dict]:
+    """Transform one raw session-JSONL entry into the dashboard's Message shape.
+
+    Returns None for entries that aren't user/assistant turns.
+    """
+    entry_type = entry.get("type")
+    if entry_type not in ("user", "assistant"):
+        return None
+
+    msg = entry.get("message", {})
+    role = msg.get("role", entry_type)
+    raw_content = msg.get("content", "")
+    timestamp = entry.get("timestamp", "")
+
+    if isinstance(raw_content, str):
+        content = [{"type": "TextBlock", "text": raw_content}]
+    elif isinstance(raw_content, list):
+        content = []
+        for block in raw_content:
+            if not isinstance(block, dict):
+                continue
+            bt = block.get("type", "")
+            if bt == "text":
+                content.append({"type": "TextBlock", "text": block.get("text", "")})
+            elif bt == "thinking":
+                content.append({"type": "ThinkingBlock", "thinking": block.get("thinking", "")})
+            elif bt == "tool_use":
+                content.append({
+                    "type": "ToolUseBlock",
+                    "tool_name": block.get("name", ""),
+                    "tool_input": block.get("input", {}),
+                    "tool_id": block.get("id", ""),
+                })
+            elif bt == "tool_result":
+                result_content = block.get("content", "")
+                if isinstance(result_content, list):
+                    result_content = "\n".join(
+                        c.get("text", "") for c in result_content if isinstance(c, dict)
+                    )
+                content.append({
+                    "type": "ToolResultBlock",
+                    "content": result_content,
+                    "is_error": block.get("is_error", False),
+                })
+    else:
+        content = []
+
+    return {
+        "type": "UserPrompt" if role == "user" else "AssistantMessage",
+        "role": role,
+        "timestamp": timestamp,
+        "content": content,
+        "model": msg.get("model", ""),
+    }
 
 
 def _read_session_messages(jsonl_path: str, offset: int = 0, limit: int = 200) -> list[dict]:
-    """Read user/assistant messages from a Claude session JSONL file.
-
-    Transforms raw JSONL entries into the format the web dashboard expects.
-    """
+    """Read user/assistant messages from a Claude session JSONL file."""
     import json
     from pathlib import Path
 
@@ -943,57 +1296,9 @@ def _read_session_messages(jsonl_path: str, offset: int = 0, limit: int = 200) -
             entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-
-        entry_type = entry.get("type")
-        if entry_type not in ("user", "assistant"):
-            continue
-
-        msg = entry.get("message", {})
-        role = msg.get("role", entry_type)
-        raw_content = msg.get("content", "")
-        timestamp = entry.get("timestamp", "")
-
-        # Transform content to dashboard ContentBlock format
-        if isinstance(raw_content, str):
-            content = [{"type": "TextBlock", "text": raw_content}]
-        elif isinstance(raw_content, list):
-            content = []
-            for block in raw_content:
-                if not isinstance(block, dict):
-                    continue
-                bt = block.get("type", "")
-                if bt == "text":
-                    content.append({"type": "TextBlock", "text": block.get("text", "")})
-                elif bt == "thinking":
-                    content.append({"type": "ThinkingBlock", "thinking": block.get("thinking", "")})
-                elif bt == "tool_use":
-                    content.append({
-                        "type": "ToolUseBlock",
-                        "tool_name": block.get("name", ""),
-                        "tool_input": block.get("input", {}),
-                        "tool_id": block.get("id", ""),
-                    })
-                elif bt == "tool_result":
-                    result_content = block.get("content", "")
-                    if isinstance(result_content, list):
-                        result_content = "\n".join(
-                            c.get("text", "") for c in result_content if isinstance(c, dict)
-                        )
-                    content.append({
-                        "type": "ToolResultBlock",
-                        "content": result_content,
-                        "is_error": block.get("is_error", False),
-                    })
-        else:
-            content = []
-
-        messages.append({
-            "type": "UserPrompt" if role == "user" else "AssistantMessage",
-            "role": role,
-            "timestamp": timestamp,
-            "content": content,
-            "model": msg.get("model", ""),
-        })
+        msg = _jsonl_entry_to_message(entry)
+        if msg is not None:
+            messages.append(msg)
 
     return messages[offset : offset + limit]
 
@@ -1022,6 +1327,125 @@ def leave():
         console.print(f"[green]Left fleet at {old_url}. Server URL and token cleared.[/green]")
     else:
         console.print("[dim]No fleet connection configured.[/dim]")
+
+
+# --------------------------------------------------------------------------
+# cfleet attach
+# --------------------------------------------------------------------------
+
+@app.command()
+def attach(
+    name: str = typer.Argument(..., help="Worker name"),
+    local: bool = typer.Option(False, "--local", help="Force local exec (skip SSH); used internally when SSH'd in"),
+):
+    """Drop into a `claude` TUI on the worker's session.
+
+    Pauses the headless relay so the TUI is the sole writer. When you exit the
+    TUI (Ctrl-D or :q), the relay resumes accepting dashboard prompts.
+
+    Run from anywhere — fetches SSH info from the server and connects to the
+    worker's host. Use `--local` if you're already on the right machine.
+    """
+    import platform
+    import subprocess
+    import urllib.error
+    import urllib.request
+    import json as _json
+    from pathlib import Path
+    from cfleet.config import FleetConfig
+
+    try:
+        cfg = FleetConfig.load()
+    except FileNotFoundError:
+        console.print("[red]Run 'cfleet init' or 'cfleet join' first.[/red]")
+        raise typer.Exit(1)
+
+    server_url = cfg.server.url
+    token = cfg.server.token
+    if not server_url or not token:
+        console.print("[red]No server configured. Run 'cfleet join <url>' first.[/red]")
+        raise typer.Exit(1)
+
+    req = urllib.request.Request(
+        f"{server_url.rstrip('/')}/api/workers/{name}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            worker = _json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        console.print(f"[red]Server returned {e.code}: {e.reason}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Could not reach server: {e}[/red]")
+        raise typer.Exit(1)
+
+    if not worker.get("connected"):
+        console.print(f"[red]Worker '{name}' is not connected to the server.[/red]")
+        raise typer.Exit(1)
+
+    session_id = worker.get("session_id")
+    if not session_id:
+        console.print(f"[red]Worker '{name}' has no session yet (send a prompt first to initialize it).[/red]")
+        raise typer.Exit(1)
+
+    workspace = worker.get("cwd", "")
+    if not workspace:
+        console.print(f"[red]Worker '{name}' has no cwd recorded.[/red]")
+        raise typer.Exit(1)
+
+    worker_machine = worker.get("machine_name", "")
+    this_machine = platform.node()
+
+    if not local and worker_machine and worker_machine != this_machine:
+        ssh_host = worker.get("ssh_host", "")
+        ssh_user = worker.get("ssh_user", "")
+        if not ssh_host:
+            console.print(
+                f"[red]Worker '{name}' is on '{worker_machine}', which has no SSH host registered.[/red]\n"
+                f"[dim]Run `cfleet attach {name}` directly on that machine, "
+                "or restart its `cfleet agent` with --ssh-host.[/dim]"
+            )
+            raise typer.Exit(1)
+        import re
+        # ssh concatenates the remote argv into a shell command on the other
+        # side, so the worker name reaches a remote shell. Lock to a strict
+        # character set to keep that hop injection-free.
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", name):
+            console.print(f"[red]Worker name '{name}' contains unsupported characters.[/red]")
+            raise typer.Exit(1)
+        target = f"{ssh_user}@{ssh_host}" if ssh_user else ssh_host
+        console.print(f"[dim]SSHing to {target} and attaching...[/dim]")
+        rc = subprocess.run(["ssh", "-t", target, "cfleet", "attach", name, "--local"]).returncode
+        raise typer.Exit(rc)
+
+    # Local exec path
+    model = worker.get("model") or cfg.model or "claude-opus-4-6"
+    api_key = cfg.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+    env = os.environ.copy()
+    if api_key:
+        env.setdefault("ANTHROPIC_API_KEY", api_key)
+
+    encoded_cwd = workspace.replace("/", "-")
+    lock_path = Path.home() / ".claude" / "projects" / encoded_cwd / f"{session_id}.lock"
+    if not Path(workspace).exists():
+        console.print(f"[red]Working directory does not exist locally: {workspace}[/red]")
+        raise typer.Exit(1)
+
+    _write_lock(str(lock_path), "tui")
+    our_pid = os.getpid()
+    console.print(f"[dim]Lock acquired. Launching claude --resume on session {session_id[:8]}...[/dim]")
+    try:
+        subprocess.run(
+            ["claude", "--resume", session_id, "--model", model],
+            cwd=workspace,
+            env=env,
+        )
+    finally:
+        if _release_lock_if_owner(str(lock_path), "tui", our_pid, "relay"):
+            console.print("[dim]Detached. Dashboard control restored.[/dim]")
+        else:
+            console.print("[dim yellow]Detached. Lock was held by another process; leaving it.[/dim yellow]")
 
 
 # --------------------------------------------------------------------------
@@ -1107,7 +1531,11 @@ def gh_set(
     worker_name: str = typer.Argument(..., help="Worker name"),
     level: str = typer.Argument(..., help="Access level: none, read, triage, or write"),
 ):
-    """Set a worker's GitHub access level. Takes effect on next token renewal."""
+    """Set a worker's GitHub access level. Takes effect on next token renewal.
+
+    For local (`cfleet agent`) workers on this machine, also wires up the git
+    credential helper in the worker's cwd so `git clone/push` Just Works.
+    """
     from cfleet.config import FleetState, GitHubLevel
 
     _validate_enum(level, GitHubLevel, "level")
@@ -1118,6 +1546,10 @@ def gh_set(
         raise typer.Exit(1)
 
     _set_worker_gh_level(worker_name, level)
+
+    worker = state.workers[worker_name]
+    if worker.local_mode and worker.cwd and level != "none":
+        _wire_local_git_credential_helper(worker_name, worker.cwd)
 
 
 # --------------------------------------------------------------------------

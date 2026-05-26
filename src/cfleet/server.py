@@ -30,8 +30,19 @@ from sse_starlette.sse import EventSourceResponse
 from cfleet.config import FleetConfig, FleetState, GitHubLevel, VMType
 from cfleet.engine import FleetEngine
 
-# Next.js static export lives in web/out/ at the repo root
-STATIC_DIR = Path(__file__).parent.parent.parent / "web" / "out"
+def _resolve_static_dir() -> Path:
+    """Locate the Next.js static export.
+
+    Installed wheels ship it as cfleet/web_out/. From a source checkout we
+    fall back to ../../web/out at the repo root.
+    """
+    bundled = Path(__file__).parent / "web_out"
+    if bundled.exists():
+        return bundled
+    return Path(__file__).parent.parent.parent / "web" / "out"
+
+
+STATIC_DIR = _resolve_static_dir()
 
 _write_executor = ThreadPoolExecutor(max_workers=1)
 _write_lock = asyncio.Lock()
@@ -400,18 +411,24 @@ def create_server_app() -> FastAPI:
             await ws.close(code=4004, reason="Missing worker_name")
             return
 
+        reg_session_id = reg.get("session_id", "")
+        reg_cwd = reg.get("cwd", "")
+        reg_model = reg.get("model", "")
+        reg_ssh_host = reg.get("ssh_host", "")
+        reg_ssh_user = reg.get("ssh_user", "")
+
         cw = await _hub.register(ws, worker_name, machine_name)
 
         # Update state to reflect connected worker (auto-create if started via `cfleet agent`)
         try:
             state = FleetState.load()
+            from cfleet.config import WorkerState as WS, MachineState as MS
+
             if worker_name in state.workers:
                 w = state.workers[worker_name]
                 if w.status in ("spawning", "provisioning", "errored"):
                     w.status = "idle"
-                    state.save()
             else:
-                from cfleet.config import WorkerState as WS
                 w = WS(
                     name=worker_name,
                     machine_name=machine_name,
@@ -419,7 +436,38 @@ def create_server_app() -> FastAPI:
                     local_mode=True,
                 )
                 state.add_worker(w)
-                state.save()
+            if reg_session_id:
+                w.session_id = reg_session_id
+            if reg_cwd:
+                w.cwd = reg_cwd
+            if reg_model:
+                w.model = reg_model
+
+            # Register / refresh the machine record so `cfleet attach` can find SSH info.
+            # Only touch ssh fields / status when the machine is "external" (BYO via
+            # `cfleet join`/`cfleet agent`). Managed machines (gcp/azure/devcontainer)
+            # are owned by the provisioner — never overwrite their SSH or flip status.
+            if machine_name:
+                if machine_name not in state.machines:
+                    state.add_machine(MS(
+                        name=machine_name,
+                        provider="external",
+                        status="ready",
+                        ssh_host=reg_ssh_host,
+                        ssh_user=reg_ssh_user,
+                    ))
+                else:
+                    m = state.machines[machine_name]
+                    if m.provider in ("", "external"):
+                        if reg_ssh_host:
+                            m.ssh_host = reg_ssh_host
+                        if reg_ssh_user:
+                            m.ssh_user = reg_ssh_user
+                        m.status = "ready"
+                if worker_name not in state.machines[machine_name].worker_names:
+                    state.machines[machine_name].worker_names.append(worker_name)
+
+            state.save()
         except Exception:
             pass
 
@@ -441,18 +489,20 @@ def create_server_app() -> FastAPI:
                         cw._pending_responses[request_id].set_result(data.get("data", {}))
 
                 elif msg_type == "event":
-                    cw.push_event(data.get("data", {}))
+                    cw.push_event({"kind": "event", "payload": data.get("data", {})})
 
                 elif msg_type == "status_update":
+                    new_status = data.get("status")
                     try:
                         state = FleetState.load()
                         if worker_name in state.workers:
-                            new_status = data.get("status")
                             if new_status in ("idle", "working", "errored"):
                                 state.workers[worker_name].status = new_status
                                 state.save()
                     except Exception:
                         pass
+                    # Also push to SSE subscribers so the dashboard can pulse.
+                    cw.push_event({"kind": "status", "status": new_status})
 
         except WebSocketDisconnect:
             pass
@@ -709,11 +759,14 @@ def create_server_app() -> FastAPI:
             "last_prompt": worker.last_prompt,
             "last_prompt_at": worker.last_prompt_at,
             "session_id": worker.session_id,
+            "cwd": worker.cwd,
             "connected": connected,
         }
         if machine:
             info["provider"] = machine.provider
             info["machine_ip"] = machine.ip
+            info["ssh_host"] = machine.ssh_host
+            info["ssh_user"] = machine.ssh_user
 
         # Get live relay status from the connected worker
         if connected:
@@ -795,6 +848,9 @@ def create_server_app() -> FastAPI:
                 "prompt": req.prompt,
             })
 
+            if "error" in result:
+                raise HTTPException(status_code=503, detail=result["error"])
+
             # Update state
             try:
                 state = FleetState.load()
@@ -807,7 +863,7 @@ def create_server_app() -> FastAPI:
             except Exception:
                 pass
 
-            return result if "error" not in result else {"ok": True}
+            return result
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -816,7 +872,9 @@ def create_server_app() -> FastAPI:
         await _verify_token(request)
         try:
             result = await _send_command_to_worker(name, {"type": "interrupt"})
-            return result if "error" not in result else {"ok": True}
+            if "error" in result:
+                raise HTTPException(status_code=503, detail=result["error"])
+            return result
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -923,13 +981,21 @@ def create_server_app() -> FastAPI:
             try:
                 while True:
                     try:
-                        event = await asyncio.wait_for(queue.get(), timeout=30.0)
-                        formatted = format_message(event) if "type" in event else str(event)
-                        if formatted.strip():
+                        envelope = await asyncio.wait_for(queue.get(), timeout=30.0)
+                        kind = envelope.get("kind")
+                        if kind == "status":
                             yield {
-                                "event": "message",
-                                "data": json.dumps({"message": event, "formatted": formatted}),
+                                "event": "status",
+                                "data": json.dumps({"status": envelope.get("status")}),
                             }
+                        elif kind == "event":
+                            payload = envelope.get("payload", {})
+                            formatted = format_message(payload) if "type" in payload else str(payload)
+                            if formatted.strip():
+                                yield {
+                                    "event": "message",
+                                    "data": json.dumps({"message": payload, "formatted": formatted}),
+                                }
                     except asyncio.TimeoutError:
                         yield {"event": "keepalive", "data": "{}"}
             finally:

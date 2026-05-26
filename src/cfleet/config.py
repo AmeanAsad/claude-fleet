@@ -239,6 +239,7 @@ class MachineState(BaseModel):
     instance_type: str = ""
     vm_type: str = "regular"  # regular | snp | tdx
     ssh_user: str = ""
+    ssh_host: str = ""  # explicit SSH target (overrides ip when set; empty = not SSH-reachable)
     container_id: str = ""  # devcontainer only
     hostname: str = ""  # external only — reported by the machine agent
     os_info: str = ""  # external only — e.g. "Ubuntu 24.04"
@@ -256,6 +257,7 @@ class WorkerState(BaseModel):
     repos: list[str] = Field(default_factory=list)
     status: str = "spawning"  # spawning | provisioning | idle | working | errored | stopped
     session_id: Optional[str] = None
+    cwd: str = ""  # working directory on the worker machine (for cfleet attach)
     github_level: str = "none"  # none | read | triage | write
     local_mode: bool = False  # True when started via `cfleet agent`
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
