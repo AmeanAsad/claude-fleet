@@ -19,6 +19,55 @@ interface Props {
   onBack: () => void;
 }
 
+// Identity heuristic for dedup: role + first text content. Same prompt typed
+// twice in a row will collapse — acceptable; users don't repeat themselves
+// verbatim in the same turn.
+function messageKey(m: Message): string {
+  const blocks = Array.isArray(m.content) ? m.content : [];
+  let text = "";
+  for (const b of blocks) {
+    if (b.type === "TextBlock" && b.text) {
+      text = b.text;
+      break;
+    }
+    if (b.type === "ToolUseBlock" && b.tool_id) {
+      text = `tool:${b.tool_id}`;
+      break;
+    }
+    if (b.type === "ToolResultBlock" && b.tool_id) {
+      text = `result:${b.tool_id}`;
+      break;
+    }
+    if (b.type === "ThinkingBlock" && b.thinking) {
+      text = `thinking:${b.thinking.slice(0, 80)}`;
+      break;
+    }
+  }
+  return `${m.role}|${m.type}|${text}`;
+}
+
+function appendUnique(prev: Message[], msg: Message): Message[] {
+  const key = messageKey(msg);
+  for (let i = prev.length - 1; i >= 0; i--) {
+    if (messageKey(prev[i]) === key) return prev;
+  }
+  return [...prev, msg];
+}
+
+function mergeUnique(prev: Message[], incoming: Message[]): Message[] {
+  if (incoming.length === 0) return prev;
+  const seen = new Set(prev.map(messageKey));
+  const out = [...prev];
+  for (const m of incoming) {
+    const k = messageKey(m);
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(m);
+    }
+  }
+  return out;
+}
+
 export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
   const [detail, setDetail] = useState<Worker | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -56,7 +105,7 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
     const source = createLogStream(
       workerName,
       (msg) => {
-        if (!cancelled) setMessages((prev) => [...prev, msg]);
+        if (!cancelled) setMessages((prev) => appendUnique(prev, msg));
       },
       (data) => {
         if (cancelled) return;
@@ -83,10 +132,7 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
       try {
         const data = await fetchMessages(workerName);
         if (!cancelled) {
-          setMessages((prev) => {
-            const newMsgs = data.messages || [];
-            return newMsgs.length > prev.length ? newMsgs : prev;
-          });
+          setMessages((prev) => mergeUnique(prev, data.messages || []));
         }
       } catch {
         /* ignore */

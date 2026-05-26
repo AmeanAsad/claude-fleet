@@ -90,6 +90,7 @@ export interface SpawnRequest {
   instance_type?: string;
   region?: string;
   machine_name?: string;
+  cwd?: string;
 }
 
 export async function spawnWorker(

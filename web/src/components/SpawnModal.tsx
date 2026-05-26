@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import type { FleetConfig } from "@/lib/types";
-import { fetchConfig, spawnWorker } from "@/lib/api";
+import type { FleetConfig, Machine } from "@/lib/types";
+import { fetchConfig, fetchMachines, spawnWorker } from "@/lib/api";
 
 interface Props {
   open: boolean;
@@ -10,32 +10,45 @@ interface Props {
   onSpawned: () => void;
 }
 
+const NEW_VM_VALUE = "__new_cloud_vm__";
+
 export default function SpawnModal({ open, onClose, onSpawned }: Props) {
   const [config, setConfig] = useState<FleetConfig | null>(null);
+  const [machines, setMachines] = useState<Machine[]>([]);
+  const [target, setTarget] = useState<string>("");
   const [name, setName] = useState("");
   const [provider, setProvider] = useState("");
   const [vmType, setVmType] = useState("");
   const [model, setModel] = useState("");
   const [instanceType, setInstanceType] = useState("");
   const [region, setRegion] = useState("");
+  const [cwd, setCwd] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (open) {
-      fetchConfig()
-        .then((c) => {
-          setConfig(c);
-          setProvider(c.provider);
-        })
-        .catch(() => {});
-      setTimeout(() => nameRef.current?.focus(), 100);
-    }
+    if (!open) return;
+    Promise.all([fetchConfig(), fetchMachines()])
+      .then(([c, m]) => {
+        setConfig(c);
+        setProvider(c.provider);
+        setMachines(m);
+        // Default target: first connected external machine, else "new cloud VM"
+        const firstExternal = m.find(
+          (mm) => mm.connected && mm.provider === "external",
+        );
+        const firstReady = m.find((mm) => mm.connected && mm.status === "ready");
+        setTarget(firstExternal?.name || firstReady?.name || NEW_VM_VALUE);
+      })
+      .catch(() => {});
+    setTimeout(() => nameRef.current?.focus(), 100);
   }, [open]);
 
   if (!open) return null;
 
+  const pickedMachine = machines.find((m) => m.name === target);
+  const usingExisting = pickedMachine !== undefined;
   const pCfg = config?.providers[provider];
 
   const handleSubmit = async () => {
@@ -47,11 +60,20 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
     setError("");
     try {
       const req: Record<string, string> = { name: name.trim() };
-      if (provider) req.provider = provider;
-      if (vmType) req.vm_type = vmType;
       if (model.trim()) req.model = model.trim();
-      if (instanceType.trim()) req.instance_type = instanceType.trim();
-      if (region.trim()) req.region = region.trim();
+
+      if (usingExisting) {
+        req.machine_name = pickedMachine.name;
+        if (pickedMachine.provider === "external") {
+          req.cwd = cwd.trim() || "~";
+        }
+      } else {
+        if (provider) req.provider = provider;
+        if (vmType) req.vm_type = vmType;
+        if (instanceType.trim()) req.instance_type = instanceType.trim();
+        if (region.trim()) req.region = region.trim();
+      }
+
       await spawnWorker(req as never);
       onSpawned();
       onClose();
@@ -59,6 +81,7 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
       setModel("");
       setInstanceType("");
       setRegion("");
+      setCwd("");
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to spawn");
     } finally {
@@ -66,15 +89,46 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
     }
   };
 
+  const machineSummary = (m: Machine): string => {
+    const parts: string[] = [m.name, m.provider || "unknown"];
+    parts.push(m.connected ? m.status : "offline");
+    const workerCount = m.worker_names?.length || 0;
+    if (workerCount > 0) parts.push(`${workerCount} worker${workerCount === 1 ? "" : "s"}`);
+    return parts.join(" · ");
+  };
+
   return (
     <div
       className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-5"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="bg-surface border border-border rounded-xl p-5 w-full max-w-[400px] animate-[fadeIn_0.2s_ease]">
-        <h2 className="text-[15px] font-semibold text-text mb-4">
-          Spawn Worker
-        </h2>
+      <div className="bg-surface border border-border rounded-xl p-5 w-full max-w-[440px] animate-[fadeIn_0.2s_ease]">
+        <h2 className="text-[15px] font-semibold text-text mb-4">Spawn Worker</h2>
+
+        <Field label="Target">
+          <select
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded-md text-[13px] focus:outline-none focus:border-accent-dim"
+          >
+            {machines.map((m) => (
+              <option
+                key={m.name}
+                value={m.name}
+                disabled={!m.connected}
+              >
+                {machineSummary(m)}
+              </option>
+            ))}
+            <option value={NEW_VM_VALUE}>+ New cloud VM…</option>
+          </select>
+          {pickedMachine && (
+            <div className="text-[10px] text-text-dim mt-0.5 italic">
+              {pickedMachine.hostname || pickedMachine.ip || ""}
+              {pickedMachine.os_info ? ` · ${pickedMachine.os_info}` : ""}
+            </div>
+          )}
+        </Field>
 
         <Field label="Name">
           <input
@@ -87,44 +141,6 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
           />
         </Field>
 
-        <Field label="Provider">
-          <select
-            value={provider}
-            onChange={(e) => setProvider(e.target.value)}
-            className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded-md text-[13px] focus:outline-none focus:border-accent-dim"
-          >
-            {config ? (
-              Object.keys(config.providers).map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                  {p === config.provider ? " (default)" : ""}
-                </option>
-              ))
-            ) : (
-              <option>Loading...</option>
-            )}
-          </select>
-          {pCfg && (
-            <div className="text-[10px] text-text-dim mt-0.5 italic">
-              {provider === "devcontainer"
-                ? "Local Docker container"
-                : `${provider} (${pCfg.region})`}
-            </div>
-          )}
-        </Field>
-
-        <Field label="VM Type">
-          <select
-            value={vmType}
-            onChange={(e) => setVmType(e.target.value)}
-            className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded-md text-[13px] focus:outline-none focus:border-accent-dim"
-          >
-            <option value="">regular</option>
-            <option value="snp">snp (AMD SEV-SNP)</option>
-            <option value="tdx">tdx (Intel TDX)</option>
-          </select>
-        </Field>
-
         <Field label="Model">
           <input
             value={model}
@@ -134,27 +150,78 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
           />
         </Field>
 
-        <Field label="Instance Type">
-          <input
-            value={instanceType}
-            onChange={(e) => setInstanceType(e.target.value)}
-            placeholder={pCfg?.instance_type || "auto"}
-            className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded-md text-[13px] focus:outline-none focus:border-accent-dim"
-          />
-        </Field>
-
-        <Field label="Region">
-          <input
-            value={region}
-            onChange={(e) => setRegion(e.target.value)}
-            placeholder={pCfg?.region || ""}
-            className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded-md text-[13px] focus:outline-none focus:border-accent-dim"
-          />
-        </Field>
-
-        {error && (
-          <div className="text-red text-xs mt-2">{error}</div>
+        {usingExisting && pickedMachine?.provider === "external" && (
+          <Field label="Working dir on the machine">
+            <input
+              value={cwd}
+              onChange={(e) => setCwd(e.target.value)}
+              placeholder="~"
+              className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded-md text-[13px] focus:outline-none focus:border-accent-dim"
+            />
+          </Field>
         )}
+
+        {!usingExisting && (
+          <>
+            <Field label="Provider">
+              <select
+                value={provider}
+                onChange={(e) => setProvider(e.target.value)}
+                className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded-md text-[13px] focus:outline-none focus:border-accent-dim"
+              >
+                {config ? (
+                  Object.keys(config.providers).map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                      {p === config.provider ? " (default)" : ""}
+                    </option>
+                  ))
+                ) : (
+                  <option>Loading...</option>
+                )}
+              </select>
+              {pCfg && (
+                <div className="text-[10px] text-text-dim mt-0.5 italic">
+                  {provider === "devcontainer"
+                    ? "Local Docker container"
+                    : `${provider} (${pCfg.region})`}
+                </div>
+              )}
+            </Field>
+
+            <Field label="VM Type">
+              <select
+                value={vmType}
+                onChange={(e) => setVmType(e.target.value)}
+                className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded-md text-[13px] focus:outline-none focus:border-accent-dim"
+              >
+                <option value="">regular</option>
+                <option value="snp">snp (AMD SEV-SNP)</option>
+                <option value="tdx">tdx (Intel TDX)</option>
+              </select>
+            </Field>
+
+            <Field label="Instance Type">
+              <input
+                value={instanceType}
+                onChange={(e) => setInstanceType(e.target.value)}
+                placeholder={pCfg?.instance_type || "auto"}
+                className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded-md text-[13px] focus:outline-none focus:border-accent-dim"
+              />
+            </Field>
+
+            <Field label="Region">
+              <input
+                value={region}
+                onChange={(e) => setRegion(e.target.value)}
+                placeholder={pCfg?.region || ""}
+                className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded-md text-[13px] focus:outline-none focus:border-accent-dim"
+              />
+            </Field>
+          </>
+        )}
+
+        {error && <div className="text-red text-xs mt-2">{error}</div>}
 
         <div className="flex gap-2 justify-end mt-4">
           <button

@@ -29,11 +29,15 @@ export interface Machine {
   instance_type: string;
   vm_type: string;
   ssh_user: string;
+  ssh_host?: string;
   container_id: string;
+  hostname?: string;
+  os_info?: string;
   status: string;
   worker_names: string[];
   next_relay_port: number;
   created_at: string;
+  connected?: boolean;
 }
 
 export interface ContentBlock {
