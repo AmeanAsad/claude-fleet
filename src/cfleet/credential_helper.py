@@ -134,8 +134,12 @@ def setup_gh_cli() -> None:
     print(get_token())
 
 
-if __name__ == "__main__":
+def main() -> None:
     if "--for-gh" in sys.argv:
         setup_gh_cli()
     else:
         git_credential_helper()
+
+
+if __name__ == "__main__":
+    main()

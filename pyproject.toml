@@ -24,6 +24,7 @@ dependencies = [
 
 [project.scripts]
 cfleet = "cfleet.cli:app"
+cfleet-gh-token = "cfleet.credential_helper:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -36,3 +37,4 @@ packages = ["src/cfleet"]
 "src/cfleet/infra_pulumi" = "cfleet/infra_pulumi"
 "src/cfleet/defaults" = "cfleet/defaults"
 "src/cfleet/devcontainer" = "cfleet/devcontainer"
+"web/out" = "cfleet/web_out"
