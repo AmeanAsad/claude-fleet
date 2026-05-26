@@ -1,18 +1,55 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { getStoredToken, setToken } from "@/lib/api";
 
 export default function Header() {
-  const [tokenValue, setTokenValue] = useState("");
+  const [tokenInput, setTokenInput] = useState("");
+  const [connected, setConnected] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState("");
 
-  useEffect(() => {
-    setTokenValue(getStoredToken());
+  const tryConnect = useCallback(async (token: string) => {
+    if (!token.trim()) return;
+    setChecking(true);
+    setError("");
+    try {
+      const res = await fetch("/api/server/info", {
+        headers: { Authorization: `Bearer ${token.trim()}` },
+      });
+      if (res.ok) {
+        setToken(token.trim());
+        setConnected(true);
+      } else {
+        setError("Invalid token");
+        setConnected(false);
+      }
+    } catch {
+      setError("Cannot reach server");
+      setConnected(false);
+    } finally {
+      setChecking(false);
+    }
   }, []);
 
-  const handleTokenChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setTokenValue(e.target.value);
-    setToken(e.target.value);
+  useEffect(() => {
+    const stored = getStoredToken();
+    if (stored) {
+      setTokenInput(stored);
+      tryConnect(stored);
+    }
+  }, [tryConnect]);
+
+  const handleConnect = () => tryConnect(tokenInput);
+
+  const handleDisconnect = () => {
+    setConnected(false);
+    setTokenInput("");
+    setToken("");
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") handleConnect();
   };
 
   return (
@@ -35,14 +72,42 @@ export default function Header() {
         <span>Claude Fleet</span>
       </div>
       <div className="flex-1" />
-      <input
-        type="password"
-        value={tokenValue}
-        onChange={handleTokenChange}
-        placeholder="API token"
-        autoComplete="off"
-        className="bg-surface-2 border border-border text-text px-2.5 py-1 rounded-md text-xs w-[140px] focus:outline-none focus:border-accent-dim"
-      />
+      {connected ? (
+        <div className="flex items-center gap-2">
+          <span className="flex items-center gap-1.5 text-xs text-green font-medium">
+            <span className="w-1.5 h-1.5 rounded-full bg-green animate-pulse" />
+            Connected
+          </span>
+          <button
+            onClick={handleDisconnect}
+            className="text-[11px] px-2 py-0.5 rounded border border-border text-text-dim hover:text-text hover:border-text transition-all cursor-pointer"
+          >
+            Reconnect
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center gap-1.5">
+          {error && (
+            <span className="text-[11px] text-red">{error}</span>
+          )}
+          <input
+            type="password"
+            value={tokenInput}
+            onChange={(e) => setTokenInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Server token"
+            autoComplete="off"
+            className="bg-surface-2 border border-border text-text px-2.5 py-1 rounded-md text-xs w-[160px] focus:outline-none focus:border-accent-dim"
+          />
+          <button
+            onClick={handleConnect}
+            disabled={checking || !tokenInput.trim()}
+            className="text-xs px-3 py-1 rounded-md font-medium border border-accent-dim text-accent bg-accent-glow hover:bg-accent-glow-strong hover:border-accent transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {checking ? "..." : "Join"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -106,6 +106,14 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
 
   const handleSend = useCallback(
     async (prompt: string) => {
+      const optimisticMsg: Message = {
+        type: "UserPrompt",
+        role: "user",
+        timestamp: new Date().toISOString(),
+        content: [{ type: "TextBlock", text: prompt }],
+      };
+      setMessages((prev) => [...prev, optimisticMsg]);
+
       try {
         await sendPrompt(workerName, prompt);
       } catch (e: unknown) {
