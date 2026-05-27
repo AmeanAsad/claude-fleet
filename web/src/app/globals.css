@@ -1,25 +1,26 @@
 @import "tailwindcss";
 
 @theme inline {
-  --color-bg: #0f0f10;
-  --color-surface: #17181a;
-  --color-surface-2: #1f2123;
-  --color-surface-3: #2a2c2f;
-  --color-border: rgba(255, 255, 255, 0.07);
-  --color-border-light: rgba(255, 255, 255, 0.18);
-  --color-text: #f5f5f5;
-  --color-text-dim: #8a8a8a;
-  --color-accent: #d4d4d4;
-  --color-accent-dim: #a8a8a8;
-  --color-accent-bright: #ffffff;
-  --color-accent-glow: rgba(255, 255, 255, 0.04);
-  --color-accent-glow-strong: rgba(255, 255, 255, 0.10);
-  --color-green: #9ac285;
-  --color-yellow: #d4c585;
-  --color-red: #d48a85;
-  --color-cyan: #b8b8b8;
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-bg: #faf9f6;
+  --color-surface: #ffffff;
+  --color-surface-2: #f4f3ef;
+  --color-surface-3: #eceae4;
+  --color-border: rgba(0, 0, 0, 0.10);
+  --color-border-light: rgba(0, 0, 0, 0.20);
+  --color-text: #1a1a1a;
+  --color-text-dim: #6b6b6b;
+  --color-accent: #2a2a2a;
+  --color-accent-dim: #555555;
+  --color-accent-bright: #000000;
+  --color-accent-glow: rgba(0, 0, 0, 0.03);
+  --color-accent-glow-strong: rgba(0, 0, 0, 0.07);
+  --color-green: #2e7d32;
+  --color-yellow: #c77700;
+  --color-red: #c62828;
+  --color-cyan: #555555;
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-serif: var(--font-serif);
 }
 
 * {
@@ -34,22 +35,27 @@ html {
 body {
   background: var(--color-bg);
   color: var(--color-text);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
   height: 100dvh;
   overflow: hidden;
 }
 
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-serif), ui-serif, Georgia, serif;
+}
+
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 5px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--color-border);
+  background: rgba(0, 0, 0, 0.12);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--color-border-light);
+  background: rgba(0, 0, 0, 0.25);
 }
 
 @keyframes pulse {

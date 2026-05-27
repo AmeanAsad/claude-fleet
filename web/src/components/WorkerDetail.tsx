@@ -19,9 +19,6 @@ interface Props {
   onBack: () => void;
 }
 
-// Identity heuristic for dedup: role + first text content. Same prompt typed
-// twice in a row will collapse — acceptable; users don't repeat themselves
-// verbatim in the same turn.
 function messageKey(m: Message): string {
   const blocks = Array.isArray(m.content) ? m.content : [];
   let text = "";
@@ -191,43 +188,43 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
   const statusBg: Record<string, string> = {
     idle: "bg-green/10 text-green",
     working: "bg-yellow/10 text-yellow",
-    spawning: "bg-cyan/10 text-cyan",
-    provisioning: "bg-cyan/10 text-cyan",
+    spawning: "bg-accent-glow text-text-dim",
+    provisioning: "bg-accent-glow text-text-dim",
     errored: "bg-red/10 text-red",
   };
 
   return (
     <section className="flex flex-col flex-1 overflow-hidden bg-bg">
       {/* Worker bar */}
-      <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border bg-surface shrink-0 flex-wrap">
+      <div className="flex items-center gap-3 px-5 py-3 border-b border-border bg-surface shrink-0 flex-wrap">
         <button
           onClick={onBack}
-          className="text-accent text-sm md:hidden cursor-pointer"
+          className="text-text-dim text-sm md:hidden cursor-pointer hover:text-text"
         >
           &larr;
         </button>
-        <div className="font-semibold text-sm text-text">{workerName}</div>
+        <div className="font-serif font-semibold text-[15px] text-text">{workerName}</div>
         <div
-          className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${statusBg[status] || "bg-surface-2 text-text-dim"}`}
+          className={`text-[10px] px-2 py-0.5 rounded-full font-medium tracking-wide uppercase ${statusBg[status] || "bg-surface-2 text-text-dim"}`}
         >
           {status}
         </div>
         <div className="flex-1" />
         <button
           onClick={() => setShowInfo(!showInfo)}
-          className="text-xs px-2.5 py-1 rounded-md border border-border text-text-dim hover:border-text hover:text-text transition-all cursor-pointer"
+          className="text-[11px] px-2.5 py-1 rounded border border-border text-text-dim hover:border-border-light hover:text-text transition-all cursor-pointer"
         >
           Info
         </button>
         <button
           onClick={handleInterrupt}
-          className="text-xs px-2.5 py-1 rounded-md border border-border text-text-dim hover:border-yellow hover:text-yellow transition-all cursor-pointer"
+          className="text-[11px] px-2.5 py-1 rounded border border-border text-text-dim hover:border-yellow hover:text-yellow transition-all cursor-pointer"
         >
           Interrupt
         </button>
         <button
           onClick={handleKill}
-          className="text-xs px-2.5 py-1 rounded-md border border-border text-text-dim hover:border-red hover:text-red transition-all cursor-pointer"
+          className="text-[11px] px-2.5 py-1 rounded border border-border text-text-dim hover:border-red hover:text-red transition-all cursor-pointer"
         >
           Kill
         </button>
@@ -235,7 +232,7 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
 
       {/* Info row */}
       {showInfo && detail && (
-        <div className="flex gap-4 flex-wrap px-4 py-2 border-b border-border bg-surface-2 text-xs">
+        <div className="flex gap-4 flex-wrap px-5 py-2.5 border-b border-border bg-surface-2 text-xs">
           <InfoChip label="Machine" value={detail.machine_name} />
           <InfoChip label="Provider" value={detail.provider} />
           <InfoChip label="IP" value={detail.machine_ip} />
@@ -264,10 +261,10 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
       {/* Toast */}
       {toast && (
         <div
-          className={`fixed bottom-5 left-1/2 -translate-x-1/2 px-4 py-2 rounded-lg text-[13px] z-50 border transition-opacity ${
+          className={`fixed bottom-5 left-1/2 -translate-x-1/2 px-4 py-2 rounded text-[13px] z-50 border transition-opacity shadow-sm ${
             toast.error
-              ? "bg-surface-2 border-red/30 text-red"
-              : "bg-surface-2 border-border text-text"
+              ? "bg-surface border-red/30 text-red"
+              : "bg-surface border-border text-text"
           }`}
         >
           {toast.msg}
@@ -281,7 +278,8 @@ function InfoChip({ label, value }: { label: string; value?: string | null }) {
   if (!value || value === "unknown") return null;
   return (
     <span className="text-text-dim">
-      <span className="text-text font-medium">{value}</span> {label}
+      <span className="text-text font-medium">{value}</span>{" "}
+      <span className="text-[10px] uppercase tracking-wide">{label}</span>
     </span>
   );
 }

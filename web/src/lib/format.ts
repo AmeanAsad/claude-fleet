@@ -26,9 +26,9 @@ export function statusColor(status: string): string {
   const map: Record<string, string> = {
     idle: "text-green",
     working: "text-yellow",
-    spawning: "text-cyan",
-    provisioning: "text-cyan",
-    creating: "text-cyan",
+    spawning: "text-accent-dim",
+    provisioning: "text-accent-dim",
+    creating: "text-accent-dim",
     errored: "text-red",
     stopped: "text-text-dim",
     ready: "text-green",
@@ -40,8 +40,8 @@ export function dotColor(status: string): string {
   const map: Record<string, string> = {
     idle: "bg-green",
     working: "bg-yellow animate-pulse",
-    spawning: "bg-cyan animate-pulse",
-    provisioning: "bg-cyan animate-pulse",
+    spawning: "bg-accent-dim animate-pulse",
+    provisioning: "bg-accent-dim animate-pulse",
     errored: "bg-red",
     stopped: "bg-text-dim",
   };

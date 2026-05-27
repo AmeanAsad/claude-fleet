@@ -18,13 +18,13 @@ export default function WorkerList({
 }: Props) {
   return (
     <aside className="flex flex-col border-r border-border bg-surface overflow-hidden w-[280px] shrink-0">
-      <div className="flex items-center justify-between px-3.5 pt-3 pb-2">
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-text-dim">
+      <div className="flex items-center justify-between px-4 pt-3.5 pb-2">
+        <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-dim">
           Workers
         </span>
         <button
           onClick={onSpawn}
-          className="text-xs px-2.5 py-0.5 rounded-md font-medium border border-accent-dim text-accent bg-accent-glow hover:bg-accent-glow-strong hover:border-accent transition-all cursor-pointer"
+          className="text-[11px] px-2.5 py-0.5 rounded font-medium bg-accent-bright text-white hover:bg-accent transition-all cursor-pointer"
         >
           + Spawn
         </button>
@@ -32,7 +32,7 @@ export default function WorkerList({
 
       <div className="flex-1 overflow-y-auto px-2 py-1">
         {workers.length === 0 && (
-          <div className="text-text-dim text-xs px-3 py-4">
+          <div className="text-text-dim text-xs px-3 py-4 italic">
             No workers running
           </div>
         )}
@@ -42,7 +42,7 @@ export default function WorkerList({
             onClick={() => onSelect(w.name)}
             className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg cursor-pointer text-left transition-colors border ${
               selected === w.name
-                ? "bg-accent-glow border-border-light"
+                ? "bg-surface-2 border-border-light"
                 : "border-transparent hover:bg-surface-2"
             }`}
           >
@@ -62,10 +62,10 @@ export default function WorkerList({
         ))}
       </div>
 
-      <div className="px-3.5 py-2.5 border-t border-border text-[11px] text-text-dim">
+      <div className="px-4 py-2.5 border-t border-border text-[11px] text-text-dim">
         {workers.length > 0 ? (
           <>
-            <span className="text-accent font-medium">{workers.length}</span>{" "}
+            <span className="text-text font-medium">{workers.length}</span>{" "}
             worker{workers.length !== 1 ? "s" : ""}
           </>
         ) : (

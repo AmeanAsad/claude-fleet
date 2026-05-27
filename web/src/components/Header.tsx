@@ -53,34 +53,20 @@ export default function Header() {
   };
 
   return (
-    <div className="flex items-center gap-3 px-4 py-2.5 bg-surface border-b border-border shrink-0 min-h-[48px]">
-      <div className="flex items-center gap-2 font-bold text-[15px] text-accent-bright tracking-tight whitespace-nowrap">
-        <svg
-          width="20"
-          height="20"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M12 2L2 7l10 5 10-5-10-5z" />
-          <path d="M2 17l10 5 10-5" />
-          <path d="M2 12l10 5 10-5" />
-        </svg>
-        <span>Claude Fleet</span>
+    <div className="flex items-center gap-3 px-5 py-3 bg-surface border-b border-border shrink-0 min-h-[52px]">
+      <div className="flex items-center gap-2.5 tracking-tight whitespace-nowrap">
+        <span className="font-serif text-[17px] font-semibold text-accent-bright">Claude Fleet</span>
       </div>
       <div className="flex-1" />
       {connected ? (
-        <div className="flex items-center gap-2">
-          <span className="flex items-center gap-1.5 text-xs text-green font-medium">
+        <div className="flex items-center gap-2.5">
+          <span className="flex items-center gap-1.5 text-[11px] text-green font-medium tracking-wide uppercase">
             <span className="w-1.5 h-1.5 rounded-full bg-green animate-pulse" />
             Connected
           </span>
           <button
             onClick={handleDisconnect}
-            className="text-[11px] px-2 py-0.5 rounded border border-border text-text-dim hover:text-text hover:border-text transition-all cursor-pointer"
+            className="text-[11px] px-2 py-0.5 rounded border border-border text-text-dim hover:text-text hover:border-border-light transition-all cursor-pointer"
           >
             Reconnect
           </button>
@@ -97,12 +83,12 @@ export default function Header() {
             onKeyDown={handleKeyDown}
             placeholder="Server token"
             autoComplete="off"
-            className="bg-surface-2 border border-border text-text px-2.5 py-1 rounded-md text-xs w-[160px] focus:outline-none focus:border-accent-dim"
+            className="bg-surface-2 border border-border text-text px-2.5 py-1.5 rounded text-xs w-[160px] focus:outline-none focus:border-border-light"
           />
           <button
             onClick={handleConnect}
             disabled={checking || !tokenInput.trim()}
-            className="text-xs px-3 py-1 rounded-md font-medium border border-accent-dim text-accent bg-accent-glow hover:bg-accent-glow-strong hover:border-accent transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+            className="text-xs px-3 py-1.5 rounded font-medium bg-accent-bright text-white hover:bg-accent transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {checking ? "..." : "Join"}
           </button>

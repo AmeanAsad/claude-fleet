@@ -34,7 +34,7 @@ export default function PromptBar({ onSend, disabled }: Props) {
   };
 
   return (
-    <div className="flex gap-2 px-4 py-2.5 border-t border-border bg-surface shrink-0">
+    <div className="flex gap-2 px-5 py-3 border-t border-border bg-surface shrink-0">
       <textarea
         ref={textareaRef}
         value={value}
@@ -43,12 +43,12 @@ export default function PromptBar({ onSend, disabled }: Props) {
         placeholder="Send a prompt..."
         rows={1}
         disabled={disabled}
-        className="flex-1 bg-surface-2 border border-border text-text px-3.5 py-2.5 rounded-lg text-sm resize-none min-h-[42px] max-h-[120px] leading-snug focus:outline-none focus:border-accent-dim focus:shadow-[0_0_0_2px_var(--color-accent-glow)] placeholder:text-text-dim disabled:opacity-50"
+        className="flex-1 bg-surface-2 border border-border text-text px-3.5 py-2.5 rounded text-sm resize-none min-h-[42px] max-h-[120px] leading-snug focus:outline-none focus:border-border-light placeholder:text-text-dim disabled:opacity-50"
       />
       <button
         onClick={handleSend}
         disabled={disabled || !value.trim()}
-        className="bg-accent-glow-strong border border-accent-dim text-accent px-4 rounded-lg font-semibold text-[13px] whitespace-nowrap transition-all hover:bg-accent hover:text-bg hover:border-accent disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+        className="bg-accent-bright text-white px-4 rounded font-medium text-[13px] whitespace-nowrap transition-all hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
       >
         Send
       </button>

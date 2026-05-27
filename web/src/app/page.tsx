@@ -70,22 +70,7 @@ export default function Home() {
             onBack={handleBack}
           />
         ) : (
-          <div className="flex-1 hidden md:flex flex-col items-center justify-center gap-3 text-text-dim text-sm">
-            <svg
-              width="48"
-              height="48"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="opacity-30"
-            >
-              <path d="M12 2L2 7l10 5 10-5-10-5z" />
-              <path d="M2 17l10 5 10-5" />
-              <path d="M2 12l10 5 10-5" />
-            </svg>
+          <div className="flex-1 hidden md:flex flex-col items-center justify-center gap-3 text-text-dim text-sm italic">
             Select a worker to view conversation
           </div>
         )}
