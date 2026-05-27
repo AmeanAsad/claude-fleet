@@ -273,3 +273,63 @@ class InfraManager:
             stack.up(on_output=lambda msg: None)
 
         self._run_with_timeout(_up)
+
+    # ------------------------------------------------------------------
+    # State inspection / repair  (cfleet machine doctor)
+    # ------------------------------------------------------------------
+
+    def refresh(self) -> None:
+        """Reconcile Pulumi state with reality across all providers.
+
+        Use when resources have been deleted out-of-band (gcloud console,
+        az portal, expired trial, etc.). Surfaces per-resource errors but
+        does not raise on individual failures.
+        """
+        stack = self._get_stack()
+
+        def _refresh():
+            stack.refresh(on_output=lambda msg: None)
+
+        self._run_with_timeout(_refresh)
+
+    def list_state_resources(self) -> list[dict]:
+        """Return the resources currently in Pulumi state.
+
+        Each dict has at least: `urn`, `type`, `name`, `provider`.
+        Filters out the stack itself and Pulumi-internal providers so the
+        caller only sees user-meaningful resources.
+        """
+        stack = self._get_stack()
+        export = stack.export_stack()
+        out: list[dict] = []
+        for res in export.deployment.get("resources", []):
+            rtype = res.get("type", "")
+            if rtype == "pulumi:pulumi:Stack" or rtype.startswith("pulumi:providers:"):
+                continue
+            urn = res.get("urn", "")
+            name = urn.rsplit("::", 1)[-1] if urn else ""
+            provider = rtype.split(":", 1)[0] if rtype else ""
+            out.append({"urn": urn, "type": rtype, "name": name, "provider": provider})
+        return out
+
+    def delete_from_state(self, urn: str) -> None:
+        """Remove a single resource from Pulumi state without touching real infra.
+
+        For drift cleanup when the underlying resource is already gone.
+        """
+        import subprocess
+        from pathlib import Path
+
+        backend = self._get_stack().workspace.work_dir
+        subprocess.run(
+            ["pulumi", "state", "delete", urn, "--yes"],
+            cwd=str(Path(backend)) if backend else None,
+            check=True,
+            capture_output=True,
+        )
+
+    def cancel(self) -> None:
+        """Cancel any in-progress Pulumi operation. Use when state is locked
+        because a previous run was killed mid-flight."""
+        stack = self._get_stack()
+        stack.cancel()

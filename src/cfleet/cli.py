@@ -363,6 +363,106 @@ def machine_agent_cmd(
     asyncio.run(agent.run())
 
 
+@machine_app.command("doctor")
+def machine_doctor(
+    refresh: bool = typer.Option(True, "--refresh/--no-refresh", help="Run pulumi refresh first"),
+    fix: bool = typer.Option(False, "--fix", help="Remove orphan records (cfleet side + Pulumi state)"),
+    cancel: bool = typer.Option(False, "--cancel", help="Run pulumi cancel to clear stuck locks"),
+):
+    """Diagnose and repair drift between cfleet state and Pulumi state.
+
+    Runs `pulumi refresh` to reconcile with reality, then reports:
+
+      • Machines in cfleet state with no matching Pulumi resource (cfleet orphans)
+      • Pulumi resources tagged for a machine that's not in cfleet (Pulumi orphans)
+
+    With `--fix`, removes cfleet orphans from state and Pulumi orphans from
+    Pulumi state (does NOT delete real cloud resources — use `cfleet machine rm`
+    for that).
+
+    With `--cancel`, runs `pulumi cancel` first to clear stuck operation locks.
+    """
+    from cfleet.config import FleetState
+    engine = _engine()
+
+    if cancel:
+        console.print("[dim]Cancelling any in-progress Pulumi operation...[/dim]")
+        try:
+            engine.infra.cancel()
+            console.print("[green]Cancelled.[/green]")
+        except Exception as e:
+            console.print(f"[yellow]pulumi cancel failed: {e}[/yellow]")
+
+    if refresh:
+        console.print("[dim]Running pulumi refresh (this may take a minute)...[/dim]")
+        try:
+            engine.infra.refresh()
+            console.print("[green]Refresh complete.[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Refresh had errors (some resources may be unreachable): {e}[/yellow]")
+
+    state = FleetState.load()
+    try:
+        resources = engine.infra.list_state_resources()
+    except Exception as e:
+        console.print(f"[red]Could not read Pulumi state: {e}[/red]")
+        raise typer.Exit(1)
+
+    # Group Pulumi resources by the machine name encoded in their resource name.
+    # The provisioner names resources like "<machine>-vm", so we match on prefix.
+    cloud_providers = {"azure", "gcp"}
+    machines_in_cfleet = {
+        n: m for n, m in state.machines.items() if m.provider in cloud_providers
+    }
+
+    pulumi_machine_names: set[str] = set()
+    for res in resources:
+        rname = res.get("name", "")
+        if rname.endswith("-vm"):
+            pulumi_machine_names.add(rname[:-3])
+
+    cfleet_orphans = sorted(set(machines_in_cfleet.keys()) - pulumi_machine_names)
+    pulumi_orphans = sorted(pulumi_machine_names - set(machines_in_cfleet.keys()))
+
+    table = Table(title="Drift report")
+    table.add_column("Status")
+    table.add_column("Where")
+    table.add_column("Name")
+    if not cfleet_orphans and not pulumi_orphans:
+        table.add_row("[green]ok[/green]", "—", "all in sync")
+    else:
+        for n in cfleet_orphans:
+            table.add_row("[yellow]orphan[/yellow]", "cfleet", n)
+        for n in pulumi_orphans:
+            table.add_row("[yellow]orphan[/yellow]", "pulumi", n)
+    console.print(table)
+
+    if not fix:
+        if cfleet_orphans or pulumi_orphans:
+            console.print("[dim]Re-run with --fix to remove orphan records.[/dim]")
+        return
+
+    # --fix path
+    for n in cfleet_orphans:
+        console.print(f"Removing cfleet record for [bold]{n}[/bold]...")
+        state.remove_machine(n)
+    if cfleet_orphans:
+        state.save()
+
+    for n in pulumi_orphans:
+        # All resources whose URN ends with the machine prefix
+        machine_resources = [r for r in resources if r["name"].startswith(f"{n}-")]
+        for r in machine_resources:
+            urn = r["urn"]
+            console.print(f"Deleting from Pulumi state: [dim]{urn}[/dim]")
+            try:
+                engine.infra.delete_from_state(urn)
+            except Exception as e:
+                console.print(f"[yellow]  failed: {e}[/yellow]")
+
+    console.print("[green]Doctor pass complete.[/green]")
+
+
 # --------------------------------------------------------------------------
 # cfleet spawn
 # --------------------------------------------------------------------------
