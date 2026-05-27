@@ -18,34 +18,50 @@ class ProvisionError(Exception):
 
 
 def _bootstrap_machine_sh() -> str:
-    """Return the bash script that bootstraps a machine (run once per machine)."""
+    """Bash script that bootstraps a cloud VM into a fleet machine.
+
+    Installs system deps, Claude Code CLI, cfleet itself from the configured
+    GitHub branch, writes ~/.cfleet/config.yml so the machine knows the fleet
+    server, and starts the machine-agent daemon as a systemd unit. After this
+    runs, the VM is identical to any laptop that did `cfleet join`.
+    """
+    # SUDO prefix is empty when running as root, "sudo -E" otherwise. We can't
+    # rely on cloud-init to leave the script root, but the default ssh user
+    # (ubuntu / azureuser / etc.) usually has passwordless sudo.
     return textwrap.dedent("""\
         #!/usr/bin/env bash
         set -euo pipefail
 
+        if [ "$(id -u)" -ne 0 ]; then
+            SUDO="sudo -E"
+        else
+            SUDO=""
+        fi
+
         echo "==> Installing system packages..."
         export DEBIAN_FRONTEND=noninteractive
-        apt-get update -y
-        apt-get install -y \\
+        ${SUDO} apt-get update -y
+        ${SUDO} apt-get install -y \\
             git curl rsync build-essential ripgrep jq wget unzip \\
-            libssl-dev pkg-config python3-pip fd-find ncurses-bin
+            libssl-dev pkg-config python3-pip python3-venv \\
+            fd-find ncurses-bin
 
         echo "==> Installing Claude Code CLI..."
         if [ ! -f "/home/${CFLEET_SSH_USER}/.local/bin/claude" ]; then
-            su - "${CFLEET_SSH_USER}" -c 'curl -fsSL https://claude.ai/install.sh | bash'
+            ${SUDO} -u "${CFLEET_SSH_USER}" bash -lc 'curl -fsSL https://claude.ai/install.sh | bash'
         fi
 
         echo "==> Configuring Claude Code..."
         CLAUDE_DIR="/home/${CFLEET_SSH_USER}/.claude"
-        mkdir -p "${CLAUDE_DIR}"
-        chown "${CFLEET_SSH_USER}:${CFLEET_SSH_USER}" "${CLAUDE_DIR}"
-        chmod 700 "${CLAUDE_DIR}"
+        ${SUDO} mkdir -p "${CLAUDE_DIR}"
+        ${SUDO} chown "${CFLEET_SSH_USER}:${CFLEET_SSH_USER}" "${CLAUDE_DIR}"
+        ${SUDO} chmod 700 "${CLAUDE_DIR}"
 
-        echo -n "${CFLEET_API_KEY}" > "${CLAUDE_DIR}/.api-key"
-        chown "${CFLEET_SSH_USER}:${CFLEET_SSH_USER}" "${CLAUDE_DIR}/.api-key"
-        chmod 600 "${CLAUDE_DIR}/.api-key"
+        echo -n "${CFLEET_API_KEY}" | ${SUDO} tee "${CLAUDE_DIR}/.api-key" >/dev/null
+        ${SUDO} chown "${CFLEET_SSH_USER}:${CFLEET_SSH_USER}" "${CLAUDE_DIR}/.api-key"
+        ${SUDO} chmod 600 "${CLAUDE_DIR}/.api-key"
 
-        cat > "${CLAUDE_DIR}/settings.json" << SETTINGS_EOF
+        ${SUDO} tee "${CLAUDE_DIR}/settings.json" >/dev/null << SETTINGS_EOF
         {
           "model": "${CFLEET_MODEL}",
           "alwaysThinkingEnabled": true,
@@ -57,54 +73,83 @@ def _bootstrap_machine_sh() -> str:
           }
         }
         SETTINGS_EOF
-        chown "${CFLEET_SSH_USER}:${CFLEET_SSH_USER}" "${CLAUDE_DIR}/settings.json"
-        chmod 600 "${CLAUDE_DIR}/settings.json"
+        ${SUDO} chown "${CFLEET_SSH_USER}:${CFLEET_SSH_USER}" "${CLAUDE_DIR}/settings.json"
+        ${SUDO} chmod 600 "${CLAUDE_DIR}/settings.json"
 
-        cat > "/home/${CFLEET_SSH_USER}/.claude.json" << ONBOARD_EOF
+        ${SUDO} tee "/home/${CFLEET_SSH_USER}/.claude.json" >/dev/null << ONBOARD_EOF
         {
           "hasCompletedOnboarding": true,
           "hasAcknowledgedDisclaimer": true,
           "effortCalloutDismissed": true,
           "projects": {
-            "/workspace": {"hasTrustDialogAccepted": true, "allowedTools": []},
             "/home/${CFLEET_SSH_USER}": {"hasTrustDialogAccepted": true, "allowedTools": []}
           }
         }
         ONBOARD_EOF
-        chown "${CFLEET_SSH_USER}:${CFLEET_SSH_USER}" "/home/${CFLEET_SSH_USER}/.claude.json"
+        ${SUDO} chown "${CFLEET_SSH_USER}:${CFLEET_SSH_USER}" "/home/${CFLEET_SSH_USER}/.claude.json"
 
-        cat > "${CLAUDE_DIR}/claude.json" << TRUST_EOF
-        {
-          "hasCompletedOnboarding": true,
-          "hasTrustDialogAccepted": true,
-          "hasTrustDialogHooksAccepted": true,
-          "hasCompletedProjectOnboarding": true
-        }
-        TRUST_EOF
-        chown "${CFLEET_SSH_USER}:${CFLEET_SSH_USER}" "${CLAUDE_DIR}/claude.json"
+        if ! grep -q 'CLAUDE_CODE_API_KEY' "/home/${CFLEET_SSH_USER}/.bashrc" 2>/dev/null; then
+            echo "export CLAUDE_CODE_API_KEY=\\"${CFLEET_API_KEY}\\"" | ${SUDO} tee -a "/home/${CFLEET_SSH_USER}/.bashrc" >/dev/null
+        fi
+        if ! grep -q '/.local/bin' "/home/${CFLEET_SSH_USER}/.bashrc" 2>/dev/null; then
+            echo 'export PATH="/home/'"${CFLEET_SSH_USER}"'/.local/bin:$PATH"' | ${SUDO} tee -a "/home/${CFLEET_SSH_USER}/.bashrc" >/dev/null
+        fi
 
-        grep -q 'CLAUDE_CODE_API_KEY' "/home/${CFLEET_SSH_USER}/.bashrc" 2>/dev/null || \\
-            echo "export CLAUDE_CODE_API_KEY=\\"${CFLEET_API_KEY}\\"" >> "/home/${CFLEET_SSH_USER}/.bashrc"
-        grep -q '/.local/bin' "/home/${CFLEET_SSH_USER}/.bashrc" 2>/dev/null || \\
-            echo 'export PATH="/home/'"${CFLEET_SSH_USER}"'/.local/bin:$PATH"' >> "/home/${CFLEET_SSH_USER}/.bashrc"
+        echo "==> Installing cfleet from ${CFLEET_REPO}@${CFLEET_BRANCH}..."
+        ${SUDO} pip3 install --break-system-packages --quiet \\
+            "git+${CFLEET_REPO}@${CFLEET_BRANCH}" 2>/dev/null || \\
+        ${SUDO} pip3 install --quiet "git+${CFLEET_REPO}@${CFLEET_BRANCH}"
 
-        echo "==> Installing relay Python dependencies..."
-        pip3 install --break-system-packages --quiet \\
-            claude-code-sdk httpx fastapi uvicorn sse-starlette pydantic PyJWT cryptography 2>/dev/null || \\
-        pip3 install --quiet \\
-            claude-code-sdk httpx fastapi uvicorn sse-starlette pydantic PyJWT cryptography
+        # Make sure both cfleet entrypoints exist on PATH for all users.
+        CFLEET_BIN="$(python3 -c 'import shutil; print(shutil.which(\"cfleet\") or \"\")')"
+        if [ -n "${CFLEET_BIN}" ] && [ "${CFLEET_BIN}" != "/usr/local/bin/cfleet" ]; then
+            ${SUDO} ln -sf "${CFLEET_BIN}" /usr/local/bin/cfleet
+        fi
+        CFLEET_GH_BIN="$(python3 -c 'import shutil; print(shutil.which(\"cfleet-gh-token\") or \"\")')"
+        if [ -n "${CFLEET_GH_BIN}" ] && [ "${CFLEET_GH_BIN}" != "/usr/local/bin/cfleet-gh-token" ]; then
+            ${SUDO} ln -sf "${CFLEET_GH_BIN}" /usr/local/bin/cfleet-gh-token
+        fi
 
-        echo "==> Deploying relay and credential helper..."
-        mkdir -p /opt/cfleet-relay
-        for f in worker_relay.py credential_helper.py; do
-            [ -f "/tmp/cfleet-staging/${f}" ] && cp "/tmp/cfleet-staging/${f}" "/opt/cfleet-relay/${f}"
-        done
-        chown -R "${CFLEET_SSH_USER}:${CFLEET_SSH_USER}" /opt/cfleet-relay
+        echo "==> Writing ~/.cfleet/config.yml for ${CFLEET_SSH_USER}..."
+        USER_HOME="/home/${CFLEET_SSH_USER}"
+        ${SUDO} mkdir -p "${USER_HOME}/.cfleet"
+        ${SUDO} tee "${USER_HOME}/.cfleet/config.yml" >/dev/null << CFG_EOF
+        anthropic_api_key: "${CFLEET_API_KEY}"
+        model: "${CFLEET_MODEL}"
+        server:
+          url: "${CFLEET_SERVER_URL}"
+          token: "${CFLEET_SERVER_TOKEN}"
+        CFG_EOF
+        ${SUDO} chown -R "${CFLEET_SSH_USER}:${CFLEET_SSH_USER}" "${USER_HOME}/.cfleet"
+        ${SUDO} chmod 600 "${USER_HOME}/.cfleet/config.yml"
 
-        ln -sf /opt/cfleet-relay/credential_helper.py /usr/local/bin/cfleet-gh-token
-        chmod +x /opt/cfleet-relay/credential_helper.py
+        echo "==> Installing machine-agent systemd unit..."
+        ${SUDO} tee /etc/systemd/system/cfleet-machine-agent.service >/dev/null << UNIT_EOF
+        [Unit]
+        Description=Claude Fleet machine agent
+        After=network-online.target
+        Wants=network-online.target
+
+        [Service]
+        Type=simple
+        User=${CFLEET_SSH_USER}
+        WorkingDirectory=${USER_HOME}
+        Environment=HOME=${USER_HOME}
+        Environment=PATH=${USER_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
+        Environment=ANTHROPIC_API_KEY=${CFLEET_API_KEY}
+        ExecStart=/usr/local/bin/cfleet machine agent --name ${CFLEET_MACHINE_NAME} --server-url ${CFLEET_SERVER_URL} --token ${CFLEET_SERVER_TOKEN}
+        Restart=on-failure
+        RestartSec=5
+
+        [Install]
+        WantedBy=multi-user.target
+        UNIT_EOF
+
+        ${SUDO} systemctl daemon-reload
+        ${SUDO} systemctl enable --now cfleet-machine-agent.service
 
         echo "==> Machine bootstrap complete."
+        echo "==> Verify with: sudo systemctl status cfleet-machine-agent.service"
     """)
 
 
@@ -275,17 +320,29 @@ def bootstrap_machine(
     user: str,
     key_path: str,
     fleet_config,
+    machine_name: str,
 ) -> None:
-    """Bootstrap a machine: install packages, Claude Code, relay deps."""
+    """Bootstrap a cloud VM into a fleet machine.
+
+    Installs cfleet, writes ~/.cfleet/config.yml, and starts the machine-agent
+    as a systemd service so the VM self-registers with the fleet server.
+    After this returns, no further provisioning is needed — workers can be
+    spawned on the machine via the dashboard / API like any external host.
+    """
     _stage_files(ip, user, key_path, "staging", fleet_config)
 
     env_vars = {
         "CFLEET_SSH_USER": user,
         "CFLEET_API_KEY": fleet_config.anthropic_api_key,
         "CFLEET_MODEL": fleet_config.model,
+        "CFLEET_SERVER_URL": fleet_config.server.url,
+        "CFLEET_SERVER_TOKEN": fleet_config.server.token,
+        "CFLEET_MACHINE_NAME": machine_name,
+        "CFLEET_REPO": fleet_config.repo_url or "https://github.com/AmeanAsad/claude-fleet.git",
+        "CFLEET_BRANCH": fleet_config.repo_branch or "fleat/v2-fleet",
     }
 
-    ssh_run_script(ip, user, key_path, _bootstrap_machine_sh(), env_vars=env_vars, timeout=600)
+    ssh_run_script(ip, user, key_path, _bootstrap_machine_sh(), env_vars=env_vars, timeout=900)
 
 
 def provision_worker(

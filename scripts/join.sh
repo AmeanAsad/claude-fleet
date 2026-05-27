@@ -20,7 +20,7 @@ TOKEN=""
 NAME=""
 API_KEY=""
 SKIP_BOOTSTRAP=""
-MODEL="claude-opus-4-6"
+MODEL="claude-opus-4-7"
 REPO_URL="https://github.com/ameanasad/claude-fleet.git"
 BRANCH="fleat/v2-fleet"
 

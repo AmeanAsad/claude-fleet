@@ -42,7 +42,7 @@ echo -n "$ANTHROPIC_API_KEY" > "$HOME_DIR/.claude/.api-key"
 # settings.json
 cat > "$HOME_DIR/.claude/settings.json" <<EOF
 {
-  "model": "claude-opus-4-6",
+  "model": "claude-opus-4-7",
   "permissions": {
     "allow": ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "Glob(*)", "Grep(*)", "Agent(*)"],
     "deny": []

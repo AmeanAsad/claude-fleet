@@ -15,7 +15,7 @@ set -euo pipefail
 #   7. Starts the server and prints the token
 
 REPO_URL="https://github.com/ameanasad/claude-fleet.git"
-BRANCH="v1-cleanup"
+BRANCH="fleat/v2-fleet"
 INSTALL_DIR="${CFLEET_INSTALL_DIR:-$HOME/claude-fleet}"
 FLEET_PORT="${CFLEET_PORT:-8420}"
 FLEET_HOST="${CFLEET_HOST:-0.0.0.0}"
