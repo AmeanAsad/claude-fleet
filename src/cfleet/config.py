@@ -143,12 +143,50 @@ class GitHubConfig(BaseModel):
         return bool(self.app_id and self.installation_id)
 
 
+class OperatorKey(BaseModel):
+    """Per-operator API key, hashed at rest.
+
+    Each operator (laptop, ipad, CI) gets its own key. Authenticates only
+    the high-trust /api/admin/* and /api/config/secrets endpoints; revocable
+    individually without affecting workers or other operators.
+    """
+    name: str
+    key_hash: str  # sha256 hex of the issued key
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
 class ServerConfig(BaseModel):
-    """Central server config — used by both server and clients."""
+    """Central server config — used by both server and clients.
+
+    Holds three credential types:
+      - `token` (legacy): single shared bearer; honored as both operator AND
+        joiner for backwards compat during migration.
+      - `joiner_token`: new dedicated joiner credential — machines + workers
+        present this on `/ws/machine`, `/ws/worker`, `/api/github/token`,
+        and `/api/config/bootstrap`.
+      - `operator_keys`: list of named keys, each individually rotatable;
+        required for `/api/admin/*` and `/api/config/secrets`.
+
+    On the client side the same struct is used to hold the URL + whichever
+    one of the credentials this client was issued.
+    """
     url: str = ""  # e.g. http://my-server:8420 — set via `cfleet connect`
     host: str = "0.0.0.0"
     port: int = 8420
-    token: str = ""  # bearer token for API + worker registration
+    token: str = ""  # legacy single token; still accepted server-side
+    joiner_token: str = ""  # new joiner credential
+    operator_keys: list[OperatorKey] = Field(default_factory=list)  # server-side roster
+    operator_key: str = ""  # client-side: the operator key this host was issued
+
+
+class SecretsConfig(BaseModel):
+    """Canonical secret store. Lives on the central server; distributed to
+    joiners via /api/config/bootstrap and to operators via /api/config/secrets.
+
+    On a fresh client this is empty until the client connects and pulls.
+    """
+    anthropic_api_key: str = ""
+    model: str = ""  # default model joiners adopt (falls back to top-level FleetConfig.model)
 
 
 class PulumiConfig(BaseModel):
@@ -158,7 +196,7 @@ class PulumiConfig(BaseModel):
 
 
 class FleetConfig(BaseModel):
-    anthropic_api_key: str = ""
+    anthropic_api_key: str = ""  # legacy: prefer secrets.anthropic_api_key
     model: str = "claude-opus-4-6"
     secrets_env: str = "~/.cfleet/secrets.env"
     repos: list[RepoConfig] = Field(default_factory=list)
@@ -170,8 +208,22 @@ class FleetConfig(BaseModel):
     cloud: CloudConfig = CloudConfig()
     server: ServerConfig = ServerConfig()
     github: GitHubConfig = GitHubConfig()
+    secrets: SecretsConfig = SecretsConfig()
     repo_url: str = "https://github.com/AmeanAsad/claude-fleet.git"
     repo_branch: str = "fleat/v2-fleet"
+
+    def resolve_anthropic_key(self) -> str:
+        """Return the canonical Anthropic API key.
+
+        Prefers the new `secrets.anthropic_api_key` field; falls back to the
+        legacy top-level `anthropic_api_key`. Used by callers so they don't
+        have to know about the migration.
+        """
+        return self.secrets.anthropic_api_key or self.anthropic_api_key
+
+    def resolve_model(self) -> str:
+        """Return the canonical default model."""
+        return self.secrets.model or self.model
 
     @classmethod
     def load(cls, path: Path | None = None) -> FleetConfig:
