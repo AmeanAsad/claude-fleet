@@ -240,38 +240,18 @@ class MachineAgent:
             except FileNotFoundError:
                 config = FleetConfig()
 
-            if cwd:
-                worker_dir = cwd
-            else:
-                # Default: $HOME/<worker_name>/ on the machine. Predictable + easy
-                # to find when you ssh in (`cd ~ && ls`), and each worker gets its
-                # own clean directory instead of sharing $HOME.
-                worker_dir = os.path.join(os.path.expanduser("~"), worker_name)
+            # Cwd default + scaffolding (inbox/outbox/repos/CLAUDE.md) live in
+            # `cfleet agent` itself so manual launches behave the same.
+            worker_dir = cwd or os.path.join(os.path.expanduser("~"), worker_name)
             os.makedirs(worker_dir, exist_ok=True)
 
-            # Inbox/outbox + CLAUDE.md scaffolding — every worker gets these so
-            # the operator has a predictable place to drop/collect files and the
-            # agent boots with fleet-worker instructions.
-            wd_path = Path(worker_dir)
-            for sub in ("inbox", "outbox", "repos"):
-                (wd_path / sub).mkdir(exist_ok=True)
-            claude_md_dst = wd_path / "CLAUDE.md"
-            if not claude_md_dst.exists():
-                try:
-                    claude_md_src = config.resolve_claude_md()
-                except Exception:
-                    claude_md_src = None
-                if not claude_md_src or not claude_md_src.exists():
-                    claude_md_src = Path(__file__).parent / "defaults" / "CLAUDE.md"
-                if claude_md_src.exists():
-                    shutil.copy(claude_md_src, claude_md_dst)
-
             if repos:
-                # Honor --repo: clone into worker_dir/repos/.
+                # Honor --repo: clone into worker_dir/repos/ before agent boot.
                 for r in repos:
-                    dest = wd_path / "repos" / r["name"]
+                    dest = Path(worker_dir) / "repos" / r["name"]
                     if dest.exists():
                         continue
+                    dest.parent.mkdir(parents=True, exist_ok=True)
                     branch = r.get("branch", "main")
                     subprocess.run(
                         ["git", "clone", "--depth", "1", "--single-branch",

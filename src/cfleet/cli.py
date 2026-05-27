@@ -1599,7 +1599,13 @@ def agent(
     effective_server_url = server_url or cfg.server.url
     effective_token = token or cfg.server.token
     machine_name = platform.node()
-    workspace = cwd or os.getcwd()
+
+    # Default cwd to $HOME/<worker_name>/ so every worker — manual launches
+    # included — gets its own dir. Matches machine_agent._handle_spawn.
+    if cwd:
+        workspace = cwd
+    else:
+        workspace = str(Path.home() / name)
 
     if not effective_server_url:
         console.print("[red]No server URL. Pass --server-url or run 'cfleet join' first.[/red]")
@@ -1609,11 +1615,25 @@ def agent(
         console.print("[red]No server token. Pass --token or set it in config.yml[/red]")
         raise typer.Exit(1)
 
-    if not Path(workspace).exists():
-        console.print(f"[red]Working directory does not exist: {workspace}[/red]")
-        raise typer.Exit(1)
-
     workspace = str(Path(workspace).resolve())
+    Path(workspace).mkdir(parents=True, exist_ok=True)
+
+    # Scaffold inbox/outbox/repos + CLAUDE.md so manual `cfleet agent` and
+    # machine-agent-driven spawns produce identical workspaces.
+    wd_path = Path(workspace)
+    for sub in ("inbox", "outbox", "repos"):
+        (wd_path / sub).mkdir(exist_ok=True)
+    claude_md_dst = wd_path / "CLAUDE.md"
+    if not claude_md_dst.exists():
+        try:
+            claude_md_src = cfg.resolve_claude_md()
+        except Exception:
+            claude_md_src = None
+        if not claude_md_src or not claude_md_src.exists():
+            claude_md_src = Path(__file__).parent / "defaults" / "CLAUDE.md"
+        if claude_md_src.exists():
+            import shutil as _sh
+            _sh.copy(claude_md_src, claude_md_dst)
 
     # Pull the canonical Anthropic key from the server on every spawn so a
     # rotation via `cfleet secret set anthropic` takes effect without a
