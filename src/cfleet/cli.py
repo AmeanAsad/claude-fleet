@@ -1545,7 +1545,7 @@ async def _agent_run_sdk(ws, runtime: "_AgentRuntime", prompt: str) -> None:
     import sys
     import traceback
     from claude_code_sdk import query, ClaudeCodeOptions
-    from cfleet.worker_relay import _serialize_message
+    from cfleet.sdk_serialize import serialize_message as _serialize_message
 
     runtime.status = "working"
 
