@@ -66,8 +66,10 @@ def _fetch_token() -> dict:
     worker = _worker_name()
 
     if not server or not worker:
-        print("Error: CFLEET_SERVER_URL and CFLEET_WORKER_NAME must be set", file=sys.stderr)
-        sys.exit(1)
+        # Helper is invoked outside a worker context (e.g. user's everyday git).
+        # Exit silently so git falls through to the next credential helper in
+        # the chain (osxkeychain etc.) instead of prompting for a password.
+        sys.exit(0)
 
     url = f"{server}/api/github/token"
     body = json.dumps({"worker_name": worker}).encode()
