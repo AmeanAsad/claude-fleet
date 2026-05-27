@@ -907,6 +907,10 @@ def ask(
     prompt: str = typer.Argument(..., help="Prompt to send"),
 ):
     """Send a prompt to a worker."""
+    if _use_remote_server():
+        _api_request("POST", f"/api/workers/{name}/ask", body={"prompt": prompt})
+        console.print(f"[green]Prompt sent to {name}[/green]")
+        return
     engine = _engine()
     engine.ask(name, prompt)
 
@@ -920,6 +924,10 @@ def interrupt(
     name: str = typer.Argument(..., help="Worker name"),
 ):
     """Interrupt the current agent run on a worker."""
+    if _use_remote_server():
+        _api_request("POST", f"/api/workers/{name}/interrupt")
+        console.print(f"[green]Interrupt sent to {name}[/green]")
+        return
     engine = _engine()
     engine.interrupt(name)
 
