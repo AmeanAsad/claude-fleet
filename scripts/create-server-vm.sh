@@ -6,6 +6,11 @@
 # server under systemd. Prints the public URL and the auth token at the end —
 # point your laptop and your worker VMs at them.
 #
+# Reads bootstrap config from ./fleet.yml (override with CFLEET_BOOTSTRAP_CONFIG=path).
+# This is intentionally NOT ~/.cfleet/config.yml — that file only exists after
+# `cfleet connect` to an already-running server, which is the chicken-and-egg
+# we're avoiding by bootstrapping from a repo-local fleet.yml.
+#
 # Usage:
 #   ./scripts/create-server-vm.sh [--name <name>] [--size <sku>] [--port <n>]
 #                                 [--rg <resource-group>] [--branch <git-branch>]
@@ -24,7 +29,7 @@ set -euo pipefail
 VM_NAME="cfleet-server"
 VM_SIZE="Standard_B2s"           # 2 vCPU / 4 GB — plenty for the server
 FLEET_PORT="8420"
-RG=""                            # falls back to ~/.cfleet/config.yml :cloud.azure.resource_group
+RG=""                            # falls back to ./fleet.yml :cloud.azure.resource_group
 LOCATION=""                      # falls back to config; we'll derive if missing
 ADMIN_USER="azureuser"
 SSH_KEY="$HOME/.ssh/id_ed25519.pub"
@@ -32,6 +37,9 @@ REPO_URL="https://github.com/AmeanAsad/claude-fleet.git"
 BRANCH="fleat/v2-fleet"
 ANTHROPIC_KEY="${ANTHROPIC_API_KEY:-}"
 IMAGE="Canonical:ubuntu-24_04-lts:server:latest"
+# Local bootstrap config: a fleet.yml next to the repo, NOT ~/.cfleet/config.yml
+# (the latter only exists after `cfleet connect` to an already-running server).
+CFG="${CFLEET_BOOTSTRAP_CONFIG:-$(pwd)/fleet.yml}"
 
 # ---------------------------------------------------------------------------
 # Args
@@ -57,10 +65,16 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---------------------------------------------------------------------------
-# Resolve config defaults from ~/.cfleet/config.yml
+# Resolve config defaults from ./fleet.yml
 # ---------------------------------------------------------------------------
 
-CFG="$HOME/.cfleet/config.yml"
+if [[ ! -f "$CFG" ]]; then
+    echo "ERROR: bootstrap config not found at ${CFG}" >&2
+    echo "       copy fleet.yml.example to fleet.yml and fill it in," >&2
+    echo "       or set CFLEET_BOOTSTRAP_CONFIG to point at one." >&2
+    exit 1
+fi
+
 if [[ -z "$RG" && -f "$CFG" ]]; then
     RG=$(python3 -c "
 import yaml, sys, pathlib
@@ -75,7 +89,7 @@ d = yaml.safe_load(pathlib.Path('$CFG').read_text()) or {}
 print((d.get('cloud', {}).get('region') or d.get('cloud', {}).get('azure', {}).get('region') or '').strip())
 " 2>/dev/null || true)
 fi
-[[ -z "$RG" ]] && { echo "ERROR: --rg or cloud.azure.resource_group in ~/.cfleet/config.yml required" >&2; exit 1; }
+[[ -z "$RG" ]] && { echo "ERROR: --rg or cloud.azure.resource_group in ${CFG} required" >&2; exit 1; }
 [[ -z "$LOCATION" ]] && LOCATION="westeurope"
 
 if [[ -z "$ANTHROPIC_KEY" && -f "$CFG" ]]; then
@@ -89,7 +103,7 @@ print((sec or d.get('anthropic_api_key') or '').strip())
 fi
 [[ -z "$ANTHROPIC_KEY" ]] && {
     echo "ERROR: ANTHROPIC_API_KEY missing — pass --anthropic-key, set the env var," >&2
-    echo "       or fill anthropic_api_key in ~/.cfleet/config.yml" >&2
+    echo "       or fill anthropic_api_key (or secrets.anthropic_api_key) in ${CFG}" >&2
     exit 1
 }
 
@@ -108,8 +122,11 @@ print(f'GH_INSTALL_ID={shlex.quote(str(gh.get(\"installation_id\") or \"\"))}')
 print(f'GH_PEM_PATH={shlex.quote(str(gh.get(\"private_key_path\") or \"\"))}')
 " 2>/dev/null || true)"
 fi
-# Expand ~ in the pem path
+# Expand ~ in the pem path; resolve relative paths against the config file's directory
 [[ -n "$GH_PEM_PATH" ]] && GH_PEM_PATH="${GH_PEM_PATH/#\~/$HOME}"
+if [[ -n "$GH_PEM_PATH" && "$GH_PEM_PATH" != /* ]]; then
+    GH_PEM_PATH="$(cd "$(dirname "$CFG")" && pwd)/${GH_PEM_PATH#./}"
+fi
 
 [[ -f "$SSH_KEY" ]] || { echo "ERROR: SSH public key not found at $SSH_KEY" >&2; exit 1; }
 
@@ -236,7 +253,7 @@ github:
 GHCFG
 )
 else
-    echo "${DIM}    No GitHub App config in ~/.cfleet/config.yml; server will start without gh broker.${RESET}"
+    echo "${DIM}    No GitHub App config in ${CFG}; server will start without gh broker.${RESET}"
 fi
 
 # ---------------------------------------------------------------------------
