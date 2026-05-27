@@ -881,6 +881,7 @@ def create_server_app() -> FastAPI:
         await _verify_token(request)
         body = await request.json()
         worker_name = body.get("worker_name", "")
+        purge_session = bool(body.get("purge_session", False))
         if not worker_name:
             raise HTTPException(status_code=400, detail="Missing worker_name")
 
@@ -888,10 +889,19 @@ def create_server_app() -> FastAPI:
         if not cm:
             raise HTTPException(status_code=404, detail=f"Machine '{name}' is not connected")
 
-        result = await cm.send_command({
+        # Pass session_id + cwd so the machine-agent can delete the JSONL.
+        state = FleetState.load()
+        worker = state.workers.get(worker_name)
+        payload = {
             "type": "kill_worker",
             "worker_name": worker_name,
-        })
+            "purge_session": purge_session,
+        }
+        if worker:
+            payload["session_id"] = worker.session_id or ""
+            payload["cwd"] = worker.cwd or ""
+
+        result = await cm.send_command(payload)
         return result
 
     # ------------------------------------------------------------------
@@ -990,7 +1000,7 @@ def create_server_app() -> FastAPI:
         return {"task_id": task_id}
 
     @app.delete("/api/workers/{name}")
-    async def kill_worker(name: str, request: Request, purge: bool = False):
+    async def kill_worker(name: str, request: Request, purge: bool = False, purge_session: bool = False):
         await _verify_token(request)
         task_id = uuid.uuid4().hex[:8]
         _tasks[task_id] = TaskInfo(
@@ -1003,7 +1013,8 @@ def create_server_app() -> FastAPI:
         asyncio.create_task(
             _run_background_task(
                 task_id,
-                lambda name=name, purge=purge: FleetEngine().kill(name, purge=purge),
+                lambda name=name, purge=purge, purge_session=purge_session:
+                    FleetEngine().kill(name, purge=purge, purge_session=purge_session),
             )
         )
         return {"task_id": task_id}

@@ -217,6 +217,9 @@ class MachineAgent:
 
     async def _handle_kill(self, ws, data: dict, request_id: str) -> None:
         worker_name = data.get("worker_name", "")
+        purge_session = bool(data.get("purge_session", False))
+        session_id = data.get("session_id", "")
+        cwd = data.get("cwd", "")
         proc = self.workers.pop(worker_name, None)
 
         if proc is None:
@@ -236,10 +239,29 @@ class MachineAgent:
         except Exception:
             pass
 
+        purged = False
+        if purge_session and session_id and cwd:
+            try:
+                from pathlib import Path
+                encoded_cwd = cwd.replace("/", "-")
+                proj_dir = Path.home() / ".claude" / "projects" / encoded_cwd
+                for suffix in (".jsonl", ".lock"):
+                    p = proj_dir / f"{session_id}{suffix}"
+                    if p.exists():
+                        p.unlink()
+                        purged = True
+                # Also remove the session-id sidecar dir (claude --resume metadata)
+                sidecar = proj_dir / session_id
+                if sidecar.exists() and sidecar.is_dir():
+                    import shutil as _shutil
+                    _shutil.rmtree(sidecar, ignore_errors=True)
+            except Exception as e:
+                print(f"[machine] purge_session failed for {worker_name}: {e}")
+
         await ws.send(json.dumps({
             "type": "response",
             "request_id": request_id,
-            "data": {"ok": True, "worker_name": worker_name},
+            "data": {"ok": True, "worker_name": worker_name, "session_purged": purged},
         }))
 
     def _handle_signal(self) -> None:

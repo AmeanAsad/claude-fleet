@@ -440,10 +440,13 @@ class FleetEngine:
         force: bool = False,
         remove_machine: bool = False,
         purge: bool = False,
+        purge_session: bool = False,
     ) -> None:
         """Kill a worker. Always removes from state — cleanup failures are warnings.
 
         purge=True skips all remote cleanup (useful when machine is already gone).
+        purge_session=True also deletes the worker's session JSONL on the host so
+        a future worker with the same name starts with a clean conversation.
         force=True allows killing a worker not in state.
         """
         if name not in self.state.workers and not force:
@@ -469,6 +472,7 @@ class FleetEngine:
                     try:
                         self._api_post(f"/api/machines/{machine.name}/kill", {
                             "worker_name": name,
+                            "purge_session": purge_session,
                         })
                     except Exception as e:
                         console.print(f"[yellow]Warning: Failed to kill worker on external machine: {e}[/yellow]")

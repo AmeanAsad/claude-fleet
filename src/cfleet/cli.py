@@ -1039,18 +1039,40 @@ def kill(
     force: bool = typer.Option(False, "--force", help="Force kill even if state is inconsistent"),
     rm_machine: bool = typer.Option(False, "--remove-machine", help="Also remove the machine if empty after kill"),
     purge: bool = typer.Option(False, "--purge", help="Remove from state without attempting remote cleanup"),
+    purge_session: bool = typer.Option(False, "--purge-session", help="Also delete the worker's session JSONL on the host (conversation history is gone)"),
 ):
     """Destroy a worker (or all with --all).
 
-    If the worker or machine is unreachable, use --purge to remove it
-    from state without attempting any remote cleanup.
+    If the worker or machine is unreachable, use --purge to skip remote cleanup.
+    --purge-session also removes the conversation history JSONL on the host so
+    a future worker with the same name starts fresh.
     """
+    if _use_remote_server():
+        if all_workers:
+            console.print("[red]--all is not supported in remote mode yet.[/red]")
+            raise typer.Exit(1)
+        if not name:
+            console.print("[red]Provide a worker name or --all[/red]")
+            raise typer.Exit(1)
+        params = []
+        if purge:
+            params.append("purge=true")
+        if purge_session:
+            params.append("purge_session=true")
+        qs = ("?" + "&".join(params)) if params else ""
+        _api_request("DELETE", f"/api/workers/{name}{qs}")
+        msg = f"Worker {name} destroyed"
+        if purge_session:
+            msg += " (session file removed)"
+        console.print(f"[green]{msg}.[/green]")
+        return
+
     engine = _engine()
 
     if all_workers:
         engine.kill_all(collect_path=collect_to)
     elif name:
-        engine.kill(name, collect_path=collect_to, force=force, remove_machine=rm_machine, purge=purge)
+        engine.kill(name, collect_path=collect_to, force=force, remove_machine=rm_machine, purge=purge, purge_session=purge_session)
     else:
         console.print("[red]Provide a worker name or --all[/red]")
         raise typer.Exit(1)
