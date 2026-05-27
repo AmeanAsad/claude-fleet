@@ -98,6 +98,18 @@ def _engine():
     return FleetEngine()
 
 
+def _use_remote_server() -> bool:
+    """True if this host is configured to talk to a fleet server (operator or joiner)."""
+    from cfleet.config import FleetConfig
+    try:
+        cfg = FleetConfig.load()
+    except FileNotFoundError:
+        return False
+    if not cfg.server.url:
+        return False
+    return bool(cfg.server.operator_key or cfg.server.joiner_token or cfg.server.token)
+
+
 def _resolve_anthropic_key_fresh(cfg) -> str:
     """Return the most-recent Anthropic API key available to this host.
 
@@ -338,9 +350,41 @@ def machine_create(
 
 @machine_app.command("ls")
 def machine_ls():
-    """List all machines."""
-    engine = _engine()
-    machines = engine.list_machines()
+    """List all machines (queries the connected server if there is one)."""
+    if _use_remote_server():
+        rows = _api_request("GET", "/api/machines")
+        machines = [
+            {
+                "name": m.get("name", ""),
+                "provider": m.get("provider", ""),
+                "ip": m.get("ip", ""),
+                "hostname": m.get("hostname", ""),
+                "container_id": m.get("container_id", ""),
+                "region": m.get("region", ""),
+                "instance_type": m.get("instance_type", ""),
+                "worker_names": m.get("worker_names", []),
+                "status": m.get("status", ""),
+                "connected": m.get("connected", False),
+            }
+            for m in (rows or [])
+        ]
+    else:
+        engine = _engine()
+        machines = [
+            {
+                "name": m.name,
+                "provider": m.provider,
+                "ip": m.ip,
+                "hostname": m.hostname,
+                "container_id": m.container_id,
+                "region": m.region,
+                "instance_type": m.instance_type,
+                "worker_names": m.worker_names,
+                "status": m.status,
+                "connected": None,
+            }
+            for m in engine.list_machines()
+        ]
 
     if not machines:
         console.print("No machines. Run [bold]cfleet machine create <name>[/bold] to create one.")
@@ -365,17 +409,20 @@ def machine_ls():
     }
 
     for m in machines:
-        color = status_colors.get(m.status, "white")
-        ip_display = m.ip or m.hostname or (m.container_id[:12] if m.container_id else "-")
-        workers_display = ", ".join(m.worker_names) if m.worker_names else "-"
+        color = status_colors.get(m["status"], "white")
+        ip_display = m["ip"] or m["hostname"] or (m["container_id"][:12] if m["container_id"] else "-")
+        workers_display = ", ".join(m["worker_names"]) if m["worker_names"] else "-"
+        status = m["status"]
+        if m["connected"] is False and status == "ready":
+            status = "disconnected"
         table.add_row(
-            m.name,
-            m.provider,
+            m["name"],
+            m["provider"],
             ip_display,
-            m.region or "-",
-            m.instance_type,
+            m["region"] or "-",
+            m["instance_type"] or "-",
             workers_display,
-            f"[{color}]{m.status}[/{color}]",
+            f"[{color}]{status}[/{color}]",
         )
 
     console.print(table)
@@ -780,9 +827,35 @@ def spawn(
 
 @app.command(name="ls")
 def list_workers():
-    """List all fleet workers."""
-    engine = _engine()
-    workers = engine.list_workers()
+    """List all fleet workers (queries the connected server if there is one)."""
+    if _use_remote_server():
+        rows = _api_request("GET", "/api/workers")
+        workers = [
+            {
+                "name": w.get("name", ""),
+                "machine_name": w.get("machine_name", ""),
+                "status": w.get("status", ""),
+                "relay_port": w.get("relay_port", ""),
+                "model": w.get("model", ""),
+                "last_prompt": w.get("last_prompt", ""),
+                "connected": w.get("connected", False),
+            }
+            for w in (rows or [])
+        ]
+    else:
+        engine = _engine()
+        workers = [
+            {
+                "name": w.name,
+                "machine_name": w.machine_name,
+                "status": w.status,
+                "relay_port": w.relay_port,
+                "model": w.model,
+                "last_prompt": w.last_prompt,
+                "connected": None,
+            }
+            for w in engine.list_workers()
+        ]
 
     if not workers:
         console.print("No workers. Run [bold]cfleet spawn <name>[/bold] to create one.")
@@ -806,14 +879,18 @@ def list_workers():
     }
 
     for w in workers:
-        color = status_colors.get(w.status, "white")
-        prompt_display = w.last_prompt[:50] + "..." if w.last_prompt and len(w.last_prompt) > 50 else (w.last_prompt or "-")
+        color = status_colors.get(w["status"], "white")
+        last = w["last_prompt"] or ""
+        prompt_display = last[:50] + "..." if len(last) > 50 else (last or "-")
+        status = w["status"]
+        if w["connected"] is False:
+            status = f"{status} (offline)"
         table.add_row(
-            w.name,
-            w.machine_name or "-",
-            f"[{color}]{w.status}[/{color}]",
-            str(w.relay_port),
-            w.model,
+            w["name"],
+            w["machine_name"] or "-",
+            f"[{color}]{status}[/{color}]",
+            str(w["relay_port"]),
+            w["model"] or "-",
             prompt_display,
         )
 
@@ -1231,7 +1308,7 @@ def _has_systemd() -> bool:
         return False
 
 
-def _install_machine_agent_systemd(machine_name: str) -> bool:
+def _install_machine_agent_systemd(machine_name: str, ssh_host: str = "", ssh_user: str = "") -> bool:
     """Install + enable cfleet-machine-agent.service. Returns True on success.
 
     Uses sudo if the current user isn't root. Idempotent.
@@ -1242,6 +1319,12 @@ def _install_machine_agent_systemd(machine_name: str) -> bool:
     cfleet_bin = _shutil.which("cfleet") or "/usr/local/bin/cfleet"
     user = os.environ.get("USER", "")
     home = os.environ.get("HOME", "")
+
+    extra_env = ""
+    if ssh_host:
+        extra_env += f"Environment=CFLEET_SSH_HOST={ssh_host}\n"
+    if ssh_user:
+        extra_env += f"Environment=USER={ssh_user}\n"
 
     unit = f"""\
 [Unit]
@@ -1255,7 +1338,7 @@ User={user}
 WorkingDirectory={home}
 Environment=HOME={home}
 Environment=PATH={home}/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart={cfleet_bin} machine agent --name {machine_name}
+{extra_env}ExecStart={cfleet_bin} machine agent --name {machine_name}
 Restart=on-failure
 RestartSec=5
 
@@ -1299,6 +1382,8 @@ def join(
     api_key: Optional[str] = typer.Option(None, "--api-key", help="Override Anthropic API key (default: pull from server)"),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Override default model (default: pull from server)"),
     name: Optional[str] = typer.Option(None, "--name", help="Machine name (defaults to hostname)"),
+    ssh_host: Optional[str] = typer.Option(None, "--ssh-host", help="Public SSH target so operators can `cfleet attach` (auto-detects tailscale IP if omitted)"),
+    ssh_user: Optional[str] = typer.Option(None, "--ssh-user", help="SSH login user (defaults to $USER)"),
     skip_bootstrap: bool = typer.Option(False, "--skip-bootstrap", help="Skip system deps install"),
     skip_daemon: bool = typer.Option(False, "--skip-daemon", help="Skip starting the machine-agent daemon"),
 ):
@@ -1386,8 +1471,19 @@ def join(
 
     machine_name = name or platform.node()
 
+    detected_host, detected_user = _detect_ssh_target()
+    effective_ssh_host = ssh_host if ssh_host is not None else detected_host
+    effective_ssh_user = ssh_user if ssh_user is not None else detected_user
+    if effective_ssh_host:
+        console.print(f"[dim]SSH target for attach: {effective_ssh_user}@{effective_ssh_host}[/dim]")
+    else:
+        console.print(
+            "[yellow]No SSH host detected; `cfleet attach` from other machines won't work.[/yellow]\n"
+            "[dim]Pass --ssh-host <reachable-ip-or-hostname> to enable it.[/dim]"
+        )
+
     if _has_systemd():
-        if _install_machine_agent_systemd(machine_name):
+        if _install_machine_agent_systemd(machine_name, ssh_host=effective_ssh_host, ssh_user=effective_ssh_user):
             console.print(f"[green]Started cfleet-machine-agent.service ({machine_name})[/green]")
             console.print("[dim]Check status:  sudo systemctl status cfleet-machine-agent.service[/dim]")
             console.print("[dim]Tail logs:     sudo journalctl -u cfleet-machine-agent -f[/dim]")
@@ -1411,13 +1507,34 @@ def join(
 def _detect_ssh_target() -> tuple[str, str]:
     """Best-effort detection of an SSH host/user other machines could use to reach this one.
 
-    Returns ("", "") when no usable target is detected (e.g. laptop behind NAT).
-    `cfleet agent --ssh-host` lets the user override.
+    Resolution order for the host:
+      1. CFLEET_SSH_HOST env var (operator override)
+      2. tailscale IPv4 (if tailscale is installed and up)
+      3. empty (laptop behind NAT — `cfleet attach` will print a helpful message)
+
+    Returns ("", "") when nothing usable is detected.
     """
     import getpass
+    import subprocess
+
     user = os.environ.get("USER") or getpass.getuser() or ""
-    host = os.environ.get("CFLEET_SSH_HOST", "")
-    return host, user
+    host = os.environ.get("CFLEET_SSH_HOST", "").strip()
+    if host:
+        return host, user
+
+    try:
+        p = subprocess.run(
+            ["tailscale", "ip", "-4"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if p.returncode == 0:
+            ts_ip = p.stdout.strip().splitlines()[0].strip() if p.stdout.strip() else ""
+            if ts_ip:
+                return ts_ip, user
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    return "", user
 
 
 @app.command()
@@ -2113,7 +2230,11 @@ def attach(
             raise typer.Exit(1)
         target = f"{ssh_user}@{ssh_host}" if ssh_user else ssh_host
         console.print(f"[dim]SSHing to {target} and attaching...[/dim]")
-        rc = subprocess.run(["ssh", "-t", target, "cfleet", "attach", name, "--local"]).returncode
+        # Use a login shell so the remote user's PATH (which usually includes
+        # ~/.local/bin and the claude install) is picked up.
+        rc = subprocess.run(
+            ["ssh", "-t", target, "bash", "-lc", f"cfleet attach {name} --local"]
+        ).returncode
         raise typer.Exit(rc)
 
     # Local exec path
@@ -2129,12 +2250,30 @@ def attach(
         console.print(f"[red]Working directory does not exist locally: {workspace}[/red]")
         raise typer.Exit(1)
 
+    import shutil as _shutil
+    claude_bin = _shutil.which("claude")
+    if not claude_bin:
+        # Non-interactive SSH gives us a minimal PATH; check common install spots.
+        home = os.environ.get("HOME", "")
+        for candidate in (
+            f"{home}/.local/bin/claude",
+            f"{home}/.npm-global/bin/claude",
+            "/usr/local/bin/claude",
+            "/usr/bin/claude",
+        ):
+            if candidate and Path(candidate).exists():
+                claude_bin = candidate
+                break
+    if not claude_bin:
+        console.print("[red]`claude` CLI not found on PATH or in common install dirs.[/red]")
+        raise typer.Exit(1)
+
     _write_lock(str(lock_path), "tui")
     our_pid = os.getpid()
     console.print(f"[dim]Lock acquired. Launching claude --resume on session {session_id[:8]}...[/dim]")
     try:
         subprocess.run(
-            ["claude", "--resume", session_id, "--model", model],
+            [claude_bin, "--resume", session_id, "--model", model],
             cwd=workspace,
             env=env,
         )

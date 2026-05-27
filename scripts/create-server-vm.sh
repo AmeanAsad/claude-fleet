@@ -240,6 +240,15 @@ ISSUED_AT=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
 # Optionally ship the GitHub App private key to the VM
 # ---------------------------------------------------------------------------
 
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ -d "${REPO_ROOT}/web/out" ]]; then
+    echo "${GREEN}==>${RESET} Shipping local web bundle (web/out)"
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        "${ADMIN_USER}@${PUBLIC_IP}" "mkdir -p /tmp/cfleet-web-out && rm -rf /tmp/cfleet-web-out/*"
+    scp -r -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        "${REPO_ROOT}/web/out/." "${ADMIN_USER}@${PUBLIC_IP}:/tmp/cfleet-web-out/"
+fi
+
 GH_SECTION=""
 if [[ -n "$GH_APP_ID" && -n "$GH_INSTALL_ID" && -f "$GH_PEM_PATH" ]]; then
     echo "${GREEN}==>${RESET} Shipping GitHub App credentials"
@@ -269,11 +278,23 @@ export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip python3-venv git curl jq
 
-sudo pip3 install --break-system-packages --quiet "git+${REPO_URL}@${BRANCH}" 2>/dev/null \\
-  || sudo pip3 install --quiet "git+${REPO_URL}@${BRANCH}"
+# Install cfleet into a dedicated venv at /opt/cfleet (PEP 668-safe on Ubuntu 24.04).
+# We clone the repo and pip-install from a local checkout so we can stub out
+# web/out (the Next.js static export is gitignored; the server tolerates it being empty).
+sudo python3 -m venv /opt/cfleet
+sudo /opt/cfleet/bin/pip install --quiet --upgrade pip
 
-CFLEET_BIN="\$(python3 -c 'import shutil; print(shutil.which("cfleet") or "")')"
-[ -n "\${CFLEET_BIN}" ] && [ "\${CFLEET_BIN}" != "/usr/local/bin/cfleet" ] && sudo ln -sf "\${CFLEET_BIN}" /usr/local/bin/cfleet
+sudo rm -rf /opt/cfleet/src
+sudo git clone --depth 1 --branch "${BRANCH}" "${REPO_URL}" /opt/cfleet/src
+sudo mkdir -p /opt/cfleet/src/web/out
+if [ -d /tmp/cfleet-web-out ] && [ "\$(ls -A /tmp/cfleet-web-out 2>/dev/null)" ]; then
+    sudo cp -r /tmp/cfleet-web-out/. /opt/cfleet/src/web/out/
+else
+    echo '<!doctype html><title>cfleet</title>cfleet server is running. Dashboard bundle was not built into this install.' | sudo tee /opt/cfleet/src/web/out/index.html >/dev/null
+fi
+
+sudo /opt/cfleet/bin/pip install --quiet /opt/cfleet/src
+sudo ln -sf /opt/cfleet/bin/cfleet /usr/local/bin/cfleet
 
 sudo mkdir -p /root/.cfleet
 # Move the github-app pem into place if we shipped one
