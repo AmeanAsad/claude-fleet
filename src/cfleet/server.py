@@ -237,37 +237,104 @@ class AskRequest(BaseModel):
 # Auth
 # ---------------------------------------------------------------------------
 
-def _get_server_token() -> str:
-    env_token = os.environ.get("FLEET_API_TOKEN", "")
-    if env_token:
-        return env_token
+import hashlib
+
+
+def _hash_key(key: str) -> str:
+    """Hash an operator key for at-rest storage / comparison."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _classify_bearer(token_value: str) -> str | None:
+    """Classify a presented bearer as one of:
+
+      - 'operator'  → matches a hashed operator key in config.server.operator_keys
+                      (or matches the legacy single token; operators can do anything)
+      - 'joiner'    → matches config.server.joiner_token, or the legacy single token
+                      (joiner has narrower privileges; see _verify_joiner)
+      - None        → no match
+
+    Returns the highest-privilege match: 'operator' if both apply.
+    """
+    if not token_value:
+        return None
+
     try:
         config = FleetConfig.load()
-        return config.server.token
     except FileNotFoundError:
-        return ""
+        # No config means no auth requirement; treat any caller as operator
+        # so a freshly-deployed server is usable before init.
+        return "operator"
+
+    # Legacy single token: still honored as operator AND joiner for migration.
+    legacy = os.environ.get("FLEET_API_TOKEN", "") or config.server.token
+    if legacy and hmac.compare_digest(token_value, legacy):
+        return "operator"
+
+    # Operator keys are stored hashed; compare against the candidate's hash.
+    candidate_hash = _hash_key(token_value)
+    for op in config.server.operator_keys:
+        if op.key_hash and hmac.compare_digest(op.key_hash, candidate_hash):
+            return "operator"
+
+    if config.server.joiner_token and hmac.compare_digest(token_value, config.server.joiner_token):
+        return "joiner"
+
+    return None
 
 
-async def _verify_token(request: Request) -> None:
-    token = _get_server_token()
-    if not token:
-        return
+def _extract_bearer(request: Request) -> str:
     auth_header = request.headers.get("authorization", "")
     if auth_header.startswith("Bearer "):
-        bearer = auth_header[7:]
-        if hmac.compare_digest(bearer, token):
-            return
-    query_token = request.query_params.get("token", "")
-    if query_token and hmac.compare_digest(query_token, token):
-        return
-    raise HTTPException(status_code=401, detail="Invalid or missing token")
+        return auth_header[7:]
+    return request.query_params.get("token", "")
+
+
+async def _verify_any(request: Request) -> str:
+    """Accept either an operator key or a joiner token. Returns the role."""
+    role = _classify_bearer(_extract_bearer(request))
+    if role is None:
+        # If the server has no credentials configured at all, allow through;
+        # otherwise reject.
+        try:
+            cfg = FleetConfig.load()
+            if not (
+                cfg.server.token
+                or cfg.server.joiner_token
+                or cfg.server.operator_keys
+            ):
+                return "operator"
+        except FileNotFoundError:
+            return "operator"
+        raise HTTPException(status_code=401, detail="Invalid or missing token")
+    return role
+
+
+async def _verify_operator(request: Request) -> None:
+    """Operator-only endpoints. Rejects joiner tokens with 403."""
+    role = await _verify_any(request)
+    if role != "operator":
+        raise HTTPException(status_code=403, detail="Operator key required")
+
+
+# Backwards compat wrappers — older endpoints use these names.
+async def _verify_token(request: Request) -> None:
+    await _verify_any(request)
 
 
 def _verify_token_sync(token_value: str) -> bool:
-    expected = _get_server_token()
-    if not expected:
+    """Used by WebSocket register handshakes. Accept either credential type."""
+    role = _classify_bearer(token_value)
+    if role is not None:
         return True
-    return hmac.compare_digest(token_value, expected)
+    # If nothing is configured server-side, permit (fresh-server case).
+    try:
+        cfg = FleetConfig.load()
+        if not (cfg.server.token or cfg.server.joiner_token or cfg.server.operator_keys):
+            return True
+    except FileNotFoundError:
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -679,6 +746,96 @@ def create_server_app() -> FastAPI:
                 },
             },
         }
+
+    @app.get("/api/config/bootstrap")
+    async def get_bootstrap_config(request: Request):
+        """Joiner-side: minimal config a new machine/worker needs to start.
+
+        Authorised by either a joiner token or an operator key. Returns only
+        the keys joiners legitimately need (Anthropic key, default model);
+        does NOT return the GitHub App private key, joiner token roster, or
+        operator key roster.
+        """
+        await _verify_any(request)
+        config = FleetConfig.load()
+        return {
+            "anthropic_api_key": config.resolve_anthropic_key(),
+            "model": config.resolve_model(),
+        }
+
+    @app.get("/api/config/secrets")
+    async def get_secrets(request: Request):
+        """Operator-side: full secret payload for `cfleet connect --pull-secrets`."""
+        await _verify_operator(request)
+        config = FleetConfig.load()
+        return {
+            "anthropic_api_key": config.resolve_anthropic_key(),
+            "model": config.resolve_model(),
+        }
+
+    @app.put("/api/config/secrets/anthropic_api_key")
+    async def rotate_anthropic_key(request: Request):
+        """Operator-only: rotate the canonical Anthropic API key on the server."""
+        await _verify_operator(request)
+        body = await request.json()
+        new_key = (body.get("anthropic_api_key") or "").strip()
+        if not new_key:
+            raise HTTPException(status_code=400, detail="anthropic_api_key required")
+        config = FleetConfig.load()
+        config.secrets.anthropic_api_key = new_key
+        # Clear legacy field to make the new field the source of truth going
+        # forward; readers fall back to legacy only if secrets is empty.
+        config.anthropic_api_key = ""
+        config.save()
+        return {"ok": True, "rotated_at": datetime.now(timezone.utc).isoformat()}
+
+    @app.get("/api/admin/operators")
+    async def list_operators(request: Request):
+        """Operator-only: list issued operator keys (names only, never the keys)."""
+        await _verify_operator(request)
+        config = FleetConfig.load()
+        return [
+            {"name": op.name, "created_at": op.created_at}
+            for op in config.server.operator_keys
+        ]
+
+    @app.post("/api/admin/operators")
+    async def issue_operator_key(request: Request):
+        """Operator-only: mint a new operator key. Returns the raw key ONCE.
+
+        The server only stores the hash; if you lose the key, you must
+        revoke this name and create a new one.
+        """
+        await _verify_operator(request)
+        body = await request.json()
+        name = (body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name required")
+        from cfleet.config import OperatorKey
+        import secrets as _secrets
+
+        config = FleetConfig.load()
+        if any(op.name == name for op in config.server.operator_keys):
+            raise HTTPException(status_code=409, detail=f"operator '{name}' already exists")
+        raw = _secrets.token_urlsafe(32)
+        config.server.operator_keys.append(
+            OperatorKey(name=name, key_hash=_hash_key(raw))
+        )
+        config.save()
+        return {"name": name, "key": raw}
+
+    @app.delete("/api/admin/operators/{name}")
+    async def revoke_operator_key(name: str, request: Request):
+        await _verify_operator(request)
+        config = FleetConfig.load()
+        before = len(config.server.operator_keys)
+        config.server.operator_keys = [
+            op for op in config.server.operator_keys if op.name != name
+        ]
+        if len(config.server.operator_keys) == before:
+            raise HTTPException(status_code=404, detail=f"operator '{name}' not found")
+        config.save()
+        return {"ok": True, "name": name}
 
     # ------------------------------------------------------------------
     # Machines
