@@ -56,31 +56,28 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
       setError("Name is required");
       return;
     }
+    if (!usingExisting) {
+      // Cloud provisioning runs from the user's laptop (uses their gcloud/az
+      // credentials), so we don't submit anything — the modal instead shows
+      // the CLI command to paste.
+      return;
+    }
     setSubmitting(true);
     setError("");
     try {
-      const req: Record<string, string> = { name: name.trim() };
+      const req: Record<string, string> = {
+        name: name.trim(),
+        machine_name: pickedMachine!.name,
+      };
       if (model.trim()) req.model = model.trim();
-
-      if (usingExisting) {
-        req.machine_name = pickedMachine.name;
-        if (pickedMachine.provider === "external") {
-          req.cwd = cwd.trim() || "~";
-        }
-      } else {
-        if (provider) req.provider = provider;
-        if (vmType) req.vm_type = vmType;
-        if (instanceType.trim()) req.instance_type = instanceType.trim();
-        if (region.trim()) req.region = region.trim();
+      if (pickedMachine!.provider !== "devcontainer") {
+        req.cwd = cwd.trim() || "~";
       }
-
       await spawnWorker(req as never);
       onSpawned();
       onClose();
       setName("");
       setModel("");
-      setInstanceType("");
-      setRegion("");
       setCwd("");
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to spawn");
@@ -88,6 +85,17 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
       setSubmitting(false);
     }
   };
+
+  const cloudCommand = (() => {
+    const parts = ["cfleet", "machine", "create", name.trim() || "<name>"];
+    if (provider) parts.push("--provider", provider);
+    if (vmType) parts.push("--type", vmType);
+    if (region.trim()) parts.push("--region", region.trim());
+    if (instanceType.trim()) parts.push("--instance-type", instanceType.trim());
+    return parts.join(" ");
+  })();
+
+  const [copied, setCopied] = useState(false);
 
   const machineSummary = (m: Machine): string => {
     const parts: string[] = [m.name, m.provider || "unknown"];
@@ -218,6 +226,38 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
                 className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded-md text-[13px] focus:outline-none focus:border-accent-dim"
               />
             </Field>
+
+            <div className="mt-3 mb-1">
+              <div className="text-[11px] text-text-dim mb-1 uppercase tracking-wide">
+                Run this on your machine
+              </div>
+              <div className="relative">
+                <pre className="bg-surface-2 border border-border rounded-md p-2.5 pr-14 text-[12px] font-mono text-text overflow-x-auto whitespace-pre-wrap break-all">
+                  {cloudCommand}
+                </pre>
+                <button
+                  type="button"
+                  onClick={async (ev) => {
+                    ev.preventDefault();
+                    try {
+                      await navigator.clipboard.writeText(cloudCommand);
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 1200);
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                  className="absolute top-1.5 right-1.5 text-[10px] px-1.5 py-0.5 rounded border border-border text-text-dim hover:border-text hover:text-text bg-surface/80 cursor-pointer transition-colors"
+                >
+                  {copied ? "copied" : "copy"}
+                </button>
+              </div>
+              <div className="text-[10px] text-text-dim mt-1 italic">
+                Cloud VMs are provisioned from your laptop (uses your gcloud/az login).
+                After it finishes, the machine self-registers — come back to this dialog
+                and pick it from the Target list.
+              </div>
+            </div>
           </>
         )}
 
@@ -232,7 +272,7 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
           </button>
           <button
             onClick={handleSubmit}
-            disabled={submitting}
+            disabled={submitting || !usingExisting}
             className="px-3.5 py-1.5 rounded-md text-[13px] font-semibold border border-accent-dim text-accent bg-accent-glow-strong hover:bg-accent hover:text-bg hover:border-accent transition-all disabled:opacity-50 cursor-pointer"
           >
             {submitting ? "Spawning..." : "Spawn"}
