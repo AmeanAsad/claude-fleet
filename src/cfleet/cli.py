@@ -363,6 +363,168 @@ def machine_agent_cmd(
     asyncio.run(agent.run())
 
 
+# --------------------------------------------------------------------------
+# cfleet machine doctor — Pulumi state drift diagnosis + repair
+# --------------------------------------------------------------------------
+
+doctor_app = typer.Typer(help="Diagnose and repair Pulumi state drift.")
+machine_app.add_typer(doctor_app, name="doctor")
+
+
+def _doctor_summarize() -> tuple[list[dict], dict]:
+    """Return (resources_in_pulumi, fleet_state_machines)."""
+    from cfleet.config import FleetState
+    from cfleet.infra import InfraManager
+    from cfleet.config import FleetConfig
+
+    cfg = FleetConfig.load()
+    infra = InfraManager(cfg)
+    resources = infra.list_state_resources()
+    state = FleetState.load()
+    return resources, state.machines
+
+
+@doctor_app.callback(invoke_without_command=True)
+def doctor_root(ctx: typer.Context):
+    """Show drift between Pulumi state and cfleet state.
+
+    Reports resources that exist in one place but not the other. Run a
+    subcommand to actually fix drift:
+      refresh        — pulumi refresh (reconcile with cloud reality)
+      cancel         — release a stuck Pulumi lock
+      purge-state    — remove an orphan resource from Pulumi state by URN
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+
+    try:
+        resources, machines = _doctor_summarize()
+    except Exception as e:
+        console.print(f"[red]Could not read state: {e}[/red]")
+        raise typer.Exit(1)
+
+    # Index resources by machine name where possible.
+    by_machine: dict[str, list[dict]] = {}
+    other: list[dict] = []
+    for r in resources:
+        name = r.get("name", "")
+        # The pulumi program prefixes per-machine resources with the machine name.
+        matched = None
+        for mname in machines:
+            if name.startswith(f"{mname}-") or name == f"{mname}-vm" or name == mname:
+                matched = mname
+                break
+        if matched:
+            by_machine.setdefault(matched, []).append(r)
+        else:
+            other.append(r)
+
+    table = Table(title="Pulumi vs cfleet drift")
+    table.add_column("Machine")
+    table.add_column("In cfleet")
+    table.add_column("In Pulumi")
+    table.add_column("Drift")
+
+    for mname, m in machines.items():
+        in_cfleet = "yes"
+        in_pulumi = "yes" if mname in by_machine else "no"
+        drift = (
+            "—"
+            if (in_pulumi == "yes" and m.provider in ("azure", "gcp"))
+            or (in_pulumi == "no" and m.provider in ("external", "devcontainer"))
+            else "[yellow]missing from Pulumi[/yellow]"
+            if m.provider in ("azure", "gcp")
+            else "[dim]non-cloud[/dim]"
+        )
+        table.add_row(mname, in_cfleet, in_pulumi, drift)
+
+    for r in other:
+        table.add_row(
+            f"[dim]{r['name']}[/dim]",
+            "no",
+            "yes",
+            "[red]orphan in Pulumi[/red]",
+        )
+
+    if not machines and not resources:
+        console.print("[dim]No machines or Pulumi resources.[/dim]")
+        return
+
+    console.print(table)
+
+    orphan_urns = [r["urn"] for r in other]
+    if orphan_urns:
+        console.print()
+        console.print("[yellow]Orphan Pulumi resources (in state but no cfleet record):[/yellow]")
+        for urn in orphan_urns:
+            console.print(f"  {urn}")
+        console.print()
+        console.print(
+            "[dim]To drop them from Pulumi state (use only if you're sure the real "
+            "infra is gone):[/dim]"
+        )
+        for urn in orphan_urns:
+            console.print(f"  cfleet machine doctor purge-state '{urn}'")
+
+
+@doctor_app.command("refresh")
+def doctor_refresh():
+    """Reconcile Pulumi state with cloud reality.
+
+    Wraps `pulumi refresh`. Use after deleting resources out-of-band (gcloud
+    console, az portal). Per-resource failures (e.g. expired creds for one
+    provider) won't abort the whole run.
+    """
+    from cfleet.infra import InfraManager
+    from cfleet.config import FleetConfig
+
+    try:
+        InfraManager(FleetConfig.load()).refresh()
+        console.print("[green]Pulumi state refreshed.[/green]")
+    except Exception as e:
+        console.print(f"[red]Refresh failed: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@doctor_app.command("cancel")
+def doctor_cancel():
+    """Release a stuck Pulumi lock.
+
+    Use when a previous `pulumi up`/`destroy` was killed mid-flight and
+    subsequent runs fail with `the stack is currently locked`.
+    """
+    from cfleet.infra import InfraManager
+    from cfleet.config import FleetConfig
+
+    try:
+        InfraManager(FleetConfig.load()).cancel()
+        console.print("[green]Pulumi lock released.[/green]")
+    except Exception as e:
+        console.print(f"[red]Cancel failed: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@doctor_app.command("purge-state")
+def doctor_purge_state(
+    urn: str = typer.Argument(..., help="Pulumi URN to remove from state"),
+):
+    """Remove an orphan resource from Pulumi state without touching real infra.
+
+    Use only when you've confirmed the underlying resource is already gone
+    (or you've separately destroyed it with `gcloud`/`az`). The URN comes
+    from `cfleet machine doctor`.
+    """
+    from cfleet.infra import InfraManager
+    from cfleet.config import FleetConfig
+
+    try:
+        InfraManager(FleetConfig.load()).delete_from_state(urn)
+        console.print(f"[green]Removed {urn} from Pulumi state.[/green]")
+    except Exception as e:
+        console.print(f"[red]Delete failed: {e}[/red]")
+        raise typer.Exit(1)
+
+
 @machine_app.command("doctor")
 def machine_doctor(
     refresh: bool = typer.Option(True, "--refresh/--no-refresh", help="Run pulumi refresh first"),
@@ -793,18 +955,6 @@ def disconnect():
     cfg.server.url = ""
     cfg.save()
     console.print("[green]Disconnected from server. Using local SSH mode.[/green]")
-
-
-# --------------------------------------------------------------------------
-# cfleet tui
-# --------------------------------------------------------------------------
-
-@app.command()
-def tui():
-    """Launch the interactive TUI."""
-    from cfleet.tui import FleetTUI
-    app_tui = FleetTUI()
-    app_tui.run()
 
 
 # --------------------------------------------------------------------------

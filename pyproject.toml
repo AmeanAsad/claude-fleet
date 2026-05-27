@@ -1,12 +1,11 @@
 [project]
 name = "claude-fleet"
 version = "0.1.0"
-description = "CLI + TUI for orchestrating long-running Claude Code instances on cloud VMs or local containers"
+description = "CLI for orchestrating long-running Claude Code instances on cloud VMs or local containers"
 requires-python = ">=3.11"
 dependencies = [
     "typer",
     "rich",
-    "textual",
     "pyyaml",
     "pydantic",
     "pulumi",
