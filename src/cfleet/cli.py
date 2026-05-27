@@ -2231,10 +2231,12 @@ def attach(
         target = f"{ssh_user}@{ssh_host}" if ssh_user else ssh_host
         console.print(f"[dim]SSHing to {target} and attaching...[/dim]")
         # Use a login shell so the remote user's PATH (which usually includes
-        # ~/.local/bin and the claude install) is picked up.
-        rc = subprocess.run(
-            ["ssh", "-t", target, "bash", "-lc", f"cfleet attach {name} --local"]
-        ).returncode
+        # ~/.local/bin and the claude install) is picked up. ssh concatenates
+        # argv[2:] with spaces on the remote, so the whole `bash -lc ...`
+        # invocation must arrive as a single shell-token to keep the -lc
+        # argument intact.
+        remote_cmd = f"bash -lc 'cfleet attach {name} --local'"
+        rc = subprocess.run(["ssh", "-t", target, remote_cmd]).returncode
         raise typer.Exit(rc)
 
     # Local exec path
