@@ -2378,6 +2378,16 @@ def gh_set(
 
     _validate_enum(level, GitHubLevel, "level")
 
+    if _use_remote_server():
+        result = _api_request("PUT", f"/api/github/level/{worker_name}", body={"level": level})
+        console.print(
+            f"[green]Set {worker_name} -> {result.get('github_level', level)}[/green]"
+            f"  [dim](was: {result.get('previous_level', '?')})[/dim]"
+        )
+        for w in result.get("branch_protection_warnings", []) or []:
+            console.print(f"[yellow]  ⚠ {w}[/yellow]")
+        return
+
     state = FleetState.load()
     if worker_name not in state.workers:
         console.print(f"[red]Worker '{worker_name}' not found.[/red]")
@@ -2400,6 +2410,31 @@ def gh_get(
 ):
     """Show a worker's current GitHub access level."""
     from cfleet.config import FleetState, GH_PERMISSION_MAP, GitHubLevel
+
+    if _use_remote_server():
+        data = _api_request("GET", f"/api/github/level/{worker_name}")
+        level_str = data.get("github_level", "none")
+        level = GitHubLevel(level_str)
+        perms = GH_PERMISSION_MAP.get(level, {})
+
+        # Fetch repos from /api/workers/{name} (the level endpoint doesn't include them).
+        try:
+            worker = _api_request("GET", f"/api/workers/{worker_name}")
+            repos = worker.get("repos", []) or []
+        except SystemExit:
+            repos = []
+
+        console.print(f"\n[bold]{worker_name}[/bold]")
+        console.print(f"  GitHub level: [bold]{level.value}[/bold]")
+        if perms:
+            perm_str = ", ".join(f"{k}:{v}" for k, v in perms.items())
+            console.print(f"  Permissions:  {perm_str}")
+        if repos:
+            console.print(f"  Repos:        {', '.join(repos)}")
+        else:
+            console.print("  Repos:        [dim]all installed repos[/dim]")
+        console.print()
+        return
 
     state = FleetState.load()
     if worker_name not in state.workers:
@@ -2434,11 +2469,28 @@ def gh_log(
     """Show the GitHub token issuance audit log."""
     from cfleet.config import FleetState
 
-    state = FleetState.load()
-    entries = state.github_token_log
-    if worker_name:
-        entries = [e for e in entries if e.worker_name == worker_name]
-    entries = entries[-limit:]
+    if _use_remote_server():
+        params = []
+        if worker_name:
+            params.append(f"worker_name={worker_name}")
+        params.append(f"limit={limit}")
+        rows = _api_request("GET", f"/api/github/log?{'&'.join(params)}")
+        entries = [
+            type("E", (), {
+                "timestamp": e.get("timestamp", ""),
+                "worker_name": e.get("worker_name", ""),
+                "level": e.get("level", ""),
+                "repos": e.get("repos", []) or [],
+                "expires_at": e.get("expires_at", ""),
+            })()
+            for e in (rows or [])
+        ]
+    else:
+        state = FleetState.load()
+        entries = state.github_token_log
+        if worker_name:
+            entries = [e for e in entries if e.worker_name == worker_name]
+        entries = entries[-limit:]
 
     if not entries:
         console.print("No token issuance records.")
