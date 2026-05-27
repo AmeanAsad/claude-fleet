@@ -172,17 +172,26 @@ class MachineAgent:
             except FileNotFoundError:
                 config = FleetConfig()
 
-            workspace = cwd if cwd else None
-            if not workspace:
-                worker_dir = local_provision_worker(
-                    worker_name=worker_name,
-                    relay_port=0,
-                    model=model,
-                    repos=repos,
-                    fleet_config=config,
-                )
-            else:
+            if cwd:
                 worker_dir = cwd
+                os.makedirs(worker_dir, exist_ok=True)
+            else:
+                # Default: $HOME/<worker_name>/ on the machine. Predictable + easy
+                # to find when you ssh in (`cd ~ && ls`), and each worker gets its
+                # own clean directory instead of sharing $HOME.
+                home = os.path.expanduser("~")
+                worker_dir = os.path.join(home, worker_name)
+                os.makedirs(worker_dir, exist_ok=True)
+                if repos:
+                    # Honor --repo: clone into the worker dir so the agent can `cd` to them.
+                    local_provision_worker(
+                        worker_name=worker_name,
+                        relay_port=0,
+                        model=model,
+                        repos=repos,
+                        fleet_config=config,
+                        workspace=home,
+                    )
 
             env = os.environ.copy()
             env["ANTHROPIC_API_KEY"] = self.api_key or config.anthropic_api_key
