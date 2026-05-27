@@ -79,10 +79,12 @@ fi
 [[ -z "$LOCATION" ]] && LOCATION="westeurope"
 
 if [[ -z "$ANTHROPIC_KEY" && -f "$CFG" ]]; then
+    # Prefer the new secrets.anthropic_api_key; fall back to the legacy top-level field.
     ANTHROPIC_KEY=$(python3 -c "
 import yaml, pathlib
 d = yaml.safe_load(pathlib.Path('$CFG').read_text()) or {}
-print((d.get('anthropic_api_key') or '').strip())
+sec = (d.get('secrets') or {}).get('anthropic_api_key') or ''
+print((sec or d.get('anthropic_api_key') or '').strip())
 " 2>/dev/null || true)
 fi
 [[ -z "$ANTHROPIC_KEY" ]] && {
@@ -90,6 +92,24 @@ fi
     echo "       or fill anthropic_api_key in ~/.cfleet/config.yml" >&2
     exit 1
 }
+
+# Read GitHub App credentials from the laptop's config (optional but recommended).
+# If present, we ship them so the server can mint installation tokens immediately.
+GH_APP_ID=""
+GH_INSTALL_ID=""
+GH_PEM_PATH=""
+if [[ -f "$CFG" ]]; then
+    eval "$(python3 -c "
+import yaml, pathlib, shlex
+d = yaml.safe_load(pathlib.Path('$CFG').read_text()) or {}
+gh = d.get('github') or {}
+print(f'GH_APP_ID={shlex.quote(str(gh.get(\"app_id\") or \"\"))}')
+print(f'GH_INSTALL_ID={shlex.quote(str(gh.get(\"installation_id\") or \"\"))}')
+print(f'GH_PEM_PATH={shlex.quote(str(gh.get(\"private_key_path\") or \"\"))}')
+" 2>/dev/null || true)"
+fi
+# Expand ~ in the pem path
+[[ -n "$GH_PEM_PATH" ]] && GH_PEM_PATH="${GH_PEM_PATH/#\~/$HOME}"
 
 [[ -f "$SSH_KEY" ]] || { echo "ERROR: SSH public key not found at $SSH_KEY" >&2; exit 1; }
 
@@ -186,10 +206,38 @@ for i in $(seq 1 30); do
 done
 
 # ---------------------------------------------------------------------------
-# Generate a server token locally and ship it
+# Generate credentials locally so the operator gets them in plaintext exactly
+# once. We mint three things:
+#   - joiner_token: shared credential machines/workers use to join the fleet
+#   - first operator key: identifies this laptop to the operator API
+#   - operator key hash: stored on the VM (the raw key is never persisted there)
 # ---------------------------------------------------------------------------
 
-SERVER_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+JOINER_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+OPERATOR_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+OPERATOR_HASH=$(python3 -c "import hashlib,sys; print(hashlib.sha256('$OPERATOR_KEY'.encode()).hexdigest())")
+OPERATOR_NAME="${USER:-laptop}-$(date +%Y%m%d)"
+ISSUED_AT=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
+
+# ---------------------------------------------------------------------------
+# Optionally ship the GitHub App private key to the VM
+# ---------------------------------------------------------------------------
+
+GH_SECTION=""
+if [[ -n "$GH_APP_ID" && -n "$GH_INSTALL_ID" && -f "$GH_PEM_PATH" ]]; then
+    echo "${GREEN}==>${RESET} Shipping GitHub App credentials"
+    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        "$GH_PEM_PATH" "${ADMIN_USER}@${PUBLIC_IP}:/tmp/github-app.pem" >/dev/null
+    GH_SECTION=$(cat <<GHCFG
+github:
+  app_id: "${GH_APP_ID}"
+  installation_id: "${GH_INSTALL_ID}"
+  private_key_path: /root/.cfleet/github-app.pem
+GHCFG
+)
+else
+    echo "${DIM}    No GitHub App config in ~/.cfleet/config.yml; server will start without gh broker.${RESET}"
+fi
 
 # ---------------------------------------------------------------------------
 # Install + run cfleet serve on the VM
@@ -201,30 +249,45 @@ REMOTE_SCRIPT=$(cat <<REMOTE
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
-# Install Python + git
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip python3-venv git curl jq
 
-# Install cfleet from the branch
-sudo pip3 install --break-system-packages --quiet "git+${REPO_URL}@${BRANCH}" 2>/dev/null \
+sudo pip3 install --break-system-packages --quiet "git+${REPO_URL}@${BRANCH}" 2>/dev/null \\
   || sudo pip3 install --quiet "git+${REPO_URL}@${BRANCH}"
 
-# Ensure cfleet is on /usr/local/bin so root + systemd can find it
 CFLEET_BIN="\$(python3 -c 'import shutil; print(shutil.which("cfleet") or "")')"
 [ -n "\${CFLEET_BIN}" ] && [ "\${CFLEET_BIN}" != "/usr/local/bin/cfleet" ] && sudo ln -sf "\${CFLEET_BIN}" /usr/local/bin/cfleet
 
-# Write the server config so the token is fixed (not regenerated on first run)
 sudo mkdir -p /root/.cfleet
+# Move the github-app pem into place if we shipped one
+if [ -f /tmp/github-app.pem ]; then
+    sudo mv /tmp/github-app.pem /root/.cfleet/github-app.pem
+    sudo chmod 600 /root/.cfleet/github-app.pem
+fi
+
+# Write the canonical config. New schema:
+#   - secrets.anthropic_api_key  is the canonical Anthropic key
+#   - server.joiner_token        is the joiner credential (machines + workers)
+#   - server.operator_keys       lists hashed operator keys
+#   - server.token               (legacy) is left empty so we don't double-honor anything
 sudo tee /root/.cfleet/config.yml >/dev/null <<CFG
-anthropic_api_key: "${ANTHROPIC_KEY}"
 model: "claude-opus-4-7"
+secrets:
+  anthropic_api_key: "${ANTHROPIC_KEY}"
+  model: "claude-opus-4-7"
 server:
   url: "http://${PUBLIC_IP}:${FLEET_PORT}"
-  token: "${SERVER_TOKEN}"
+  host: "0.0.0.0"
+  port: ${FLEET_PORT}
+  joiner_token: "${JOINER_TOKEN}"
+  operator_keys:
+    - name: "${OPERATOR_NAME}"
+      key_hash: "${OPERATOR_HASH}"
+      created_at: "${ISSUED_AT}"
+${GH_SECTION}
 CFG
 sudo chmod 600 /root/.cfleet/config.yml
 
-# systemd unit
 sudo tee /etc/systemd/system/cfleet-server.service >/dev/null <<UNIT
 [Unit]
 Description=Claude Fleet central server
@@ -264,14 +327,20 @@ cat <<DONE
 
 ${GREEN}${BOLD}cfleet server is up.${RESET}
 
-  URL:    ${BOLD}${SERVER_URL}${RESET}
-  Token:  ${BOLD}${SERVER_TOKEN}${RESET}
+  URL:           ${BOLD}${SERVER_URL}${RESET}
+  Operator key:  ${BOLD}${OPERATOR_KEY}${RESET}    (name: ${OPERATOR_NAME})
+  Joiner token:  ${BOLD}${JOINER_TOKEN}${RESET}
 
-${BOLD}Connect this laptop:${RESET}
-  cfleet connect ${SERVER_URL} --token ${SERVER_TOKEN}
+${DIM}Save the operator key now — the server only stores its hash and can't show it again.${RESET}
 
-${BOLD}Join a remote machine as a fleet member:${RESET}
-  cfleet join ${SERVER_URL} --token ${SERVER_TOKEN}
+${BOLD}Connect this laptop (operator mode):${RESET}
+  cfleet connect ${SERVER_URL} --operator-key ${OPERATOR_KEY}
+
+${BOLD}Issue an operator key for a second device:${RESET}
+  cfleet operator add <name>
+
+${BOLD}Join a worker host:${RESET}
+  cfleet join ${SERVER_URL} --joiner-token ${JOINER_TOKEN}
 
 ${BOLD}Tail the server logs:${RESET}
   ssh ${ADMIN_USER}@${PUBLIC_IP} 'sudo journalctl -u cfleet-server -f'
