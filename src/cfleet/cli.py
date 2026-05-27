@@ -1609,15 +1609,22 @@ def agent(
     # for git processes descended from this `cfleet agent`. Using
     # GIT_CONFIG_COUNT/KEY/VALUE keeps it process-scoped; no user-global
     # gitconfig is touched, so `git pull` in unrelated repos isn't affected.
+    #
+    # We inject THREE entries: an empty `helper =` to reset any helpers from
+    # the user's ~/.gitconfig (which often has `gh auth git-credential` wired
+    # up for github.com — that would otherwise race ours and win), then our
+    # helper, then useHttpPath so the helper sees the full repo URL.
     import shutil as _shutil
     gh_helper = _shutil.which("cfleet-gh-token")
     if gh_helper:
         existing_count = int(os.environ.get("GIT_CONFIG_COUNT", "0") or 0)
-        os.environ["GIT_CONFIG_COUNT"] = str(existing_count + 2)
+        os.environ["GIT_CONFIG_COUNT"] = str(existing_count + 3)
         os.environ[f"GIT_CONFIG_KEY_{existing_count}"] = "credential.https://github.com.helper"
-        os.environ[f"GIT_CONFIG_VALUE_{existing_count}"] = gh_helper
-        os.environ[f"GIT_CONFIG_KEY_{existing_count + 1}"] = "credential.https://github.com.useHttpPath"
-        os.environ[f"GIT_CONFIG_VALUE_{existing_count + 1}"] = "true"
+        os.environ[f"GIT_CONFIG_VALUE_{existing_count}"] = ""
+        os.environ[f"GIT_CONFIG_KEY_{existing_count + 1}"] = "credential.https://github.com.helper"
+        os.environ[f"GIT_CONFIG_VALUE_{existing_count + 1}"] = gh_helper
+        os.environ[f"GIT_CONFIG_KEY_{existing_count + 2}"] = "credential.https://github.com.useHttpPath"
+        os.environ[f"GIT_CONFIG_VALUE_{existing_count + 2}"] = "true"
 
     session_id = str(uuid.uuid4())
     encoded_cwd = workspace.replace("/", "-")
