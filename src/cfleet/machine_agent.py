@@ -35,7 +35,10 @@ class MachineAgent:
         self.machine_name = machine_name
         self.api_key = api_key
         self.model = model
-        self.workers: dict[str, subprocess.Popen] = {}
+        # name -> {"proc": Popen|None, "pid": int}
+        # "proc" is set when we spawned the worker ourselves; "pid" is always set.
+        # Adopted workers (registered with the server but not spawned by us) have proc=None.
+        self.workers: dict[str, dict] = {}
         self._next_port = 8421
         self._shutdown = False
 
@@ -75,6 +78,9 @@ class MachineAgent:
 
         while not self._shutdown:
             try:
+                # Adopt any pre-existing workers before announcing ourselves so
+                # the server's first view matches reality on this host.
+                self._reconcile_workers()
                 async with websockets.connect(self._ws_url()) as ws:
                     await ws.send(json.dumps({
                         "type": "register",
@@ -120,19 +126,82 @@ class MachineAgent:
         while True:
             await asyncio.sleep(30)
             try:
-                alive = []
-                for name, proc in list(self.workers.items()):
-                    if proc.poll() is None:
-                        alive.append(name)
-                    else:
-                        del self.workers[name]
-
+                # Refresh worker map: adopt newly-registered workers from the server,
+                # and drop any dead PIDs.
+                self._reconcile_workers()
+                alive = list(self.workers.keys())
                 await ws.send(json.dumps({
                     "type": "heartbeat",
                     "worker_names": alive,
                 }))
             except Exception:
                 break
+
+    def _is_alive(self, entry: dict) -> bool:
+        """Check whether a worker entry's process is still running."""
+        proc = entry.get("proc")
+        if proc is not None:
+            return proc.poll() is None
+        pid = entry.get("pid")
+        if not pid:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
+
+    def _find_pid_by_worker_name(self, worker_name: str) -> int | None:
+        """Find a running `cfleet agent <worker_name>` process. Returns PID or None."""
+        import re as _re
+        if not _re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", worker_name):
+            return None
+        try:
+            p = subprocess.run(
+                ["pgrep", "-f", f"cfleet agent {worker_name}"],
+                capture_output=True, text=True,
+            )
+            if p.returncode != 0 or not p.stdout.strip():
+                return None
+            # Take the first match; multiple shouldn't happen but pgrep is line-per-pid.
+            return int(p.stdout.strip().splitlines()[0])
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def _server_worker_names(self) -> list[str]:
+        """Ask the server which workers are registered for this machine."""
+        import urllib.request, urllib.error
+        try:
+            req = urllib.request.Request(
+                f"{self.server_url}/api/machines/{self.machine_name}/workers",
+                headers={"Authorization": f"Bearer {self.token}"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+            if isinstance(data, list):
+                return [str(n) for n in data]
+        except Exception:
+            pass
+        return []
+
+    def _reconcile_workers(self) -> None:
+        """Sync self.workers with the server's view + actual processes on this host.
+
+        - Adopt server-known workers whose process is running but we don't track.
+        - Drop entries whose PID is dead.
+        """
+        # Drop dead entries
+        for name in list(self.workers.keys()):
+            if not self._is_alive(self.workers[name]):
+                del self.workers[name]
+
+        # Adopt new ones
+        for name in self._server_worker_names():
+            if name in self.workers:
+                continue
+            pid = self._find_pid_by_worker_name(name)
+            if pid:
+                self.workers[name] = {"proc": None, "pid": pid}
 
     async def _handle_message(self, ws, data: dict) -> None:
         msg_type = data.get("type")
@@ -209,7 +278,7 @@ class MachineAgent:
             ]
 
             proc = subprocess.Popen(cmd, env=env)
-            self.workers[worker_name] = proc
+            self.workers[worker_name] = {"proc": proc, "pid": proc.pid}
 
             await ws.send(json.dumps({
                 "type": "response",
@@ -229,9 +298,13 @@ class MachineAgent:
         purge_session = bool(data.get("purge_session", False))
         session_id = data.get("session_id", "")
         cwd = data.get("cwd", "")
-        proc = self.workers.pop(worker_name, None)
 
-        if proc is None:
+        # Make sure we know about all workers on this machine (including ones
+        # spawned manually via `cfleet agent` outside our spawn path).
+        self._reconcile_workers()
+        entry = self.workers.pop(worker_name, None)
+
+        if entry is None:
             await ws.send(json.dumps({
                 "type": "response",
                 "request_id": request_id,
@@ -239,12 +312,34 @@ class MachineAgent:
             }))
             return
 
+        proc = entry.get("proc")
+        pid = entry.get("pid")
+        killed_via = "owned" if proc else "adopted"
         try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            if proc is not None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            elif pid:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                # Wait up to ~5s for graceful exit
+                for _ in range(20):
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                    await asyncio.sleep(0.25)
+                else:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                        killed_via = "adopted-kill"
+                    except ProcessLookupError:
+                        pass
         except Exception:
             pass
 
@@ -270,15 +365,23 @@ class MachineAgent:
         await ws.send(json.dumps({
             "type": "response",
             "request_id": request_id,
-            "data": {"ok": True, "worker_name": worker_name, "session_purged": purged},
+            "data": {
+                "ok": True,
+                "worker_name": worker_name,
+                "session_purged": purged,
+                "killed_via": killed_via,
+            },
         }))
 
     def _handle_signal(self) -> None:
         self._shutdown = True
 
     async def _cleanup(self) -> None:
-        print("[machine] Shutting down, stopping workers...")
-        for name, proc in self.workers.items():
+        print("[machine] Shutting down, stopping workers we own (adopted ones are left running)...")
+        for name, entry in self.workers.items():
+            proc = entry.get("proc")
+            if proc is None:
+                continue
             try:
                 proc.terminate()
                 proc.wait(timeout=5)

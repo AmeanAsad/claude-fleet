@@ -853,6 +853,20 @@ def create_server_app() -> FastAPI:
             result.append(d)
         return result
 
+    @app.get("/api/machines/{name}/workers")
+    async def list_machine_workers(name: str, request: Request):
+        """Return the names of workers registered for this machine.
+
+        Used by the machine-agent on (re)connect to adopt workers it didn't spawn
+        itself (e.g. someone ran `cfleet agent` directly on the host), so kill
+        commands work uniformly regardless of how the worker was started.
+        """
+        await _verify_token(request)
+        state = FleetState.load()
+        if name not in state.machines:
+            raise HTTPException(status_code=404, detail=f"Machine '{name}' not found")
+        return [w.name for w in state.workers.values() if w.machine_name == name]
+
     @app.post("/api/machines/{name}/spawn")
     async def spawn_on_machine(name: str, request: Request):
         """Send a spawn command to an external machine via its WebSocket."""
