@@ -1668,6 +1668,23 @@ def agent(
         os.environ[f"GIT_CONFIG_KEY_{existing_count + 2}"] = "credential.https://github.com.useHttpPath"
         os.environ[f"GIT_CONFIG_VALUE_{existing_count + 2}"] = "true"
 
+    # `gh` CLI shim: prepend a tiny wrapper to PATH that mints a fresh token
+    # for every invocation. Avoids env-var staleness (GH App installation
+    # tokens expire ~1h) and avoids touching ~/.config/gh.
+    real_gh = _shutil.which("gh")
+    if gh_helper and real_gh:
+        shim_dir = Path(workspace).parent / ".cfleet-bin"
+        shim_dir.mkdir(exist_ok=True)
+        shim_path = shim_dir / "gh"
+        shim_path.write_text(
+            "#!/usr/bin/env bash\n"
+            f'exec env GH_TOKEN="$(printf \'host=github.com\\n\\n\' | {gh_helper} get '
+            "| awk -F= '/^password=/{print $2}')\" "
+            f'{real_gh} "$@"\n'
+        )
+        shim_path.chmod(0o755)
+        os.environ["PATH"] = f"{shim_dir}:{os.environ.get('PATH', '')}"
+
     session_id = str(uuid.uuid4())
     encoded_cwd = workspace.replace("/", "-")
     jsonl_path = str(Path.home() / ".claude" / "projects" / encoded_cwd / f"{session_id}.jsonl")
