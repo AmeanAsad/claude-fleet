@@ -20,13 +20,118 @@ app.add_typer(machine_app, name="machine")
 gh_app = typer.Typer(help="GitHub App token broker — manage per-worker GitHub access.")
 app.add_typer(gh_app, name="gh")
 
+operator_app = typer.Typer(help="Operator keys — individually revocable credentials for the operator API.")
+app.add_typer(operator_app, name="operator")
+
+secret_app = typer.Typer(help="Server-side canonical secrets (Anthropic key, default model).")
+app.add_typer(secret_app, name="secret")
+
 console = Console()
+
+
+# ---------------------------------------------------------------------------
+# Thin HTTP client for the central server
+# ---------------------------------------------------------------------------
+
+def _api_request(method: str, path: str, *, body: dict | None = None, role: str = "any") -> dict:
+    """Send an authenticated request to the configured fleet server.
+
+    `role` is a hint for which credential to prefer when both are present:
+      - 'operator' : prefer server.operator_key, fall back to server.token
+      - 'joiner'   : prefer server.joiner_token, fall back to server.token
+      - 'any'      : use whichever is non-empty, operator first
+
+    Exits with a clear message if no server is configured or the request fails.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+    from cfleet.config import FleetConfig
+
+    try:
+        cfg = FleetConfig.load()
+    except FileNotFoundError:
+        console.print("[red]No fleet config found. Run 'cfleet init' or 'cfleet connect' first.[/red]")
+        raise typer.Exit(1)
+
+    if not cfg.server.url:
+        console.print("[red]No server URL set. Run 'cfleet connect <url>' first.[/red]")
+        raise typer.Exit(1)
+
+    if role == "operator":
+        token = cfg.server.operator_key or cfg.server.token
+    elif role == "joiner":
+        token = cfg.server.joiner_token or cfg.server.token
+    else:
+        token = cfg.server.operator_key or cfg.server.joiner_token or cfg.server.token
+
+    if not token:
+        console.print("[red]No credential configured for the fleet server.[/red]")
+        raise typer.Exit(1)
+
+    url = f"{cfg.server.url.rstrip('/')}{path}"
+    data = _json.dumps(body).encode() if body is not None else None
+    headers = {"Authorization": f"Bearer {token}"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = resp.read()
+            return _json.loads(payload) if payload else {}
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        try:
+            detail = _json.loads(detail).get("detail", detail)
+        except Exception:
+            pass
+        console.print(f"[red]Server returned {e.code}: {detail}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Could not reach server: {e}[/red]")
+        raise typer.Exit(1)
 
 
 def _engine():
     """Lazy-load engine to avoid import overhead on --help."""
     from cfleet.engine import FleetEngine
     return FleetEngine()
+
+
+def _resolve_anthropic_key_fresh(cfg) -> str:
+    """Return the most-recent Anthropic API key available to this host.
+
+    Order:
+      1. ANTHROPIC_API_KEY env var (explicit override always wins)
+      2. Fresh fetch from server's /api/config/bootstrap if we have a credential
+      3. Cached value in local config (secrets.anthropic_api_key, then legacy field)
+
+    Best-effort: silently falls through on any network/HTTP error so workers
+    don't fail to start when the server is briefly unreachable.
+    """
+    env_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if env_key:
+        return env_key
+
+    cred = cfg.server.operator_key or cfg.server.joiner_token or cfg.server.token
+    if cfg.server.url and cred:
+        try:
+            import json as _json
+            import urllib.request
+
+            req = urllib.request.Request(
+                f"{cfg.server.url.rstrip('/')}/api/config/bootstrap",
+                headers={"Authorization": f"Bearer {cred}"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = _json.loads(resp.read())
+            fresh = data.get("anthropic_api_key", "")
+            if fresh:
+                return fresh
+        except Exception:
+            pass  # fall through to cached
+
+    return cfg.resolve_anthropic_key()
 
 
 def _detect_default_provider() -> str:
@@ -347,7 +452,7 @@ def machine_agent_cmd(
         console.print("[red]Missing server URL or token. Run 'cfleet join' or pass --server-url/--token.[/red]")
         raise typer.Exit(1)
 
-    api_key = cfg.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+    api_key = _resolve_anthropic_key_fresh(cfg)
     if not api_key:
         console.print("[red]ANTHROPIC_API_KEY missing — set it in ~/.cfleet/config.yml or env.[/red]")
         raise typer.Exit(1)
@@ -908,33 +1013,81 @@ def serve(
 @app.command()
 def connect(
     server_url: str = typer.Argument(..., help="Server URL (e.g. http://my-server:8420)"),
-    token: Optional[str] = typer.Option(None, "--token", "-t", help="Server token for authentication"),
+    operator_key: Optional[str] = typer.Option(None, "--operator-key", help="Operator key (preferred)"),
+    token: Optional[str] = typer.Option(None, "--token", "-t", help="Legacy single-token alias"),
+    pull_secrets: bool = typer.Option(True, "--pull-secrets/--no-pull-secrets", help="Also pull canonical secrets (Anthropic key, default model) into local config"),
 ):
     """Point this CLI at a fleet server (operator mode).
 
-    Saves server URL + token to ~/.cfleet/config.yml so that `cfleet ls`,
-    `cfleet spawn`, `cfleet attach`, etc. talk to that fleet. Use this on a
-    laptop or CI box that runs the cfleet CLI but doesn't itself host workers.
+    Saves the server URL + your operator key to ~/.cfleet/config.yml. Operator
+    keys are issued via `cfleet operator add <name>` on a host that already
+    authenticates to the server — typically the server's host itself, or
+    another laptop you've already connected.
 
-    For machines that should host workers (i.e. expose themselves as targets
-    the fleet can spawn agents on), use `cfleet join` instead.
+    With --pull-secrets (default), also fetches the canonical Anthropic key
+    and default model from the server so the local config matches without
+    you having to type them in again.
+
+    For machines that should host workers, use `cfleet join` instead.
     """
-    from cfleet.config import FleetConfig
+    import json as _json
+    import urllib.error
+    import urllib.request
+    from cfleet.config import FleetConfig, FLEET_DIR
 
     try:
         cfg = FleetConfig.load()
     except FileNotFoundError:
-        console.print("[red]Run 'cfleet init' first.[/red]")
-        raise typer.Exit(1)
+        FLEET_DIR.mkdir(parents=True, exist_ok=True)
+        cfg = FleetConfig()
 
-    cfg.server.url = server_url.rstrip("/")
-    if token:
+    server_url = server_url.rstrip("/")
+    effective_key = operator_key or token or cfg.server.operator_key or cfg.server.token
+
+    cfg.server.url = server_url
+    if operator_key:
+        cfg.server.operator_key = operator_key
+        # Mirror into legacy field for older code paths that read server.token.
+        cfg.server.token = operator_key
+    elif token:
         cfg.server.token = token
+        cfg.server.operator_key = token
     cfg.save()
 
     console.print(f"[green]Connected to server at {server_url}[/green]")
-    if not token and not cfg.server.token:
-        console.print("[yellow]No token set — set one with --token or in config.yml[/yellow]")
+    if not effective_key:
+        console.print(
+            "[yellow]No credential set. Pass --operator-key (recommended) or --token.[/yellow]"
+        )
+        return
+
+    if pull_secrets:
+        try:
+            req = urllib.request.Request(
+                f"{server_url}/api/config/secrets",
+                headers={"Authorization": f"Bearer {effective_key}"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read())
+            if data.get("anthropic_api_key"):
+                cfg.secrets.anthropic_api_key = data["anthropic_api_key"]
+                cfg.anthropic_api_key = ""  # clear legacy so secrets is the source
+            if data.get("model"):
+                cfg.secrets.model = data["model"]
+            cfg.save()
+            console.print("[green]Pulled canonical secrets from server.[/green]")
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                console.print(
+                    f"[yellow]Skipped secret pull: server returned {e.code}. "
+                    f"Likely this is a joiner-only credential — use 'cfleet join' "
+                    f"on host machines, or issue an operator key.[/yellow]"
+                )
+            else:
+                detail = e.read().decode(errors="replace")
+                console.print(f"[yellow]Skipped secret pull: server returned {e.code}: {detail}[/yellow]")
+        except Exception as e:
+            console.print(f"[yellow]Skipped secret pull: {e}[/yellow]")
 
 
 # --------------------------------------------------------------------------
@@ -955,6 +1108,100 @@ def disconnect():
     cfg.server.url = ""
     cfg.save()
     console.print("[green]Disconnected from server. Using local SSH mode.[/green]")
+
+
+# --------------------------------------------------------------------------
+# cfleet operator — manage per-operator keys against the server
+# --------------------------------------------------------------------------
+
+@operator_app.command("add")
+def operator_add(
+    name: str = typer.Argument(..., help="Friendly name for this operator (e.g. 'amean-laptop')"),
+):
+    """Mint a new operator key on the server. Prints the raw key ONCE.
+
+    Save the printed key somewhere safe — the server only stores the hash, so
+    if you lose it you must `cfleet operator rm <name>` and re-issue.
+    """
+    resp = _api_request("POST", "/api/admin/operators", body={"name": name}, role="operator")
+    key = resp.get("key", "")
+    console.print(f"[green]Issued operator key[/green] '[bold]{name}[/bold]'")
+    console.print(f"  [bold]{key}[/bold]")
+    console.print("[dim]This is the only time you'll see the raw key. Save it now.[/dim]")
+    console.print(
+        f"[dim]On the receiving machine: cfleet connect <server-url> --operator-key {key}[/dim]"
+    )
+
+
+@operator_app.command("ls")
+def operator_ls():
+    """List operator keys registered on the server (names + created_at only)."""
+    rows = _api_request("GET", "/api/admin/operators", role="operator")
+    if not rows:
+        console.print("[dim]No operator keys issued yet.[/dim]")
+        return
+    table = Table()
+    table.add_column("Name")
+    table.add_column("Created at")
+    for r in rows:
+        table.add_row(r.get("name", ""), r.get("created_at", ""))
+    console.print(table)
+
+
+@operator_app.command("rm")
+def operator_rm(
+    name: str = typer.Argument(..., help="Operator name to revoke"),
+):
+    """Revoke an operator key. Takes effect immediately on the server."""
+    _api_request("DELETE", f"/api/admin/operators/{name}", role="operator")
+    console.print(f"[green]Revoked operator key '[bold]{name}[/bold]'.[/green]")
+
+
+# --------------------------------------------------------------------------
+# cfleet secret — rotate the canonical Anthropic key on the server
+# --------------------------------------------------------------------------
+
+@secret_app.command("set")
+def secret_set(
+    key: str = typer.Argument(..., help="Secret name (currently only 'anthropic')"),
+    value: str = typer.Argument(..., help="The new secret value"),
+):
+    """Rotate a canonical secret on the server.
+
+    Currently supports 'anthropic'. New `cfleet agent` spawns on every worker
+    pick up the rotated value automatically; in-flight processes keep their
+    existing env until restarted.
+    """
+    if key not in {"anthropic", "anthropic_api_key"}:
+        console.print(f"[red]Unknown secret '{key}'. Supported: anthropic[/red]")
+        raise typer.Exit(1)
+    _api_request(
+        "PUT",
+        "/api/config/secrets/anthropic_api_key",
+        body={"anthropic_api_key": value},
+        role="operator",
+    )
+    console.print("[green]Anthropic key rotated.[/green]")
+    console.print("[dim]Existing workers keep the old key until restarted.[/dim]")
+
+
+@secret_app.command("get")
+def secret_get():
+    """Pull the canonical secrets from the server into local config.
+
+    Same effect as `cfleet connect --pull-secrets`. Useful after rotation if
+    you want to refresh local state without reconnecting.
+    """
+    from cfleet.config import FleetConfig
+
+    data = _api_request("GET", "/api/config/secrets", role="operator")
+    cfg = FleetConfig.load()
+    if data.get("anthropic_api_key"):
+        cfg.secrets.anthropic_api_key = data["anthropic_api_key"]
+    if data.get("model"):
+        cfg.secrets.model = data["model"]
+    cfg.save()
+    console.print("[green]Pulled secrets from server.[/green]")
 
 
 # --------------------------------------------------------------------------
@@ -1047,27 +1294,32 @@ WantedBy=multi-user.target
 @app.command()
 def join(
     server_url: str = typer.Argument(..., help="Server URL (e.g. http://my-server:8420)"),
-    token: Optional[str] = typer.Option(None, "--token", "-t", help="Server token"),
-    api_key: Optional[str] = typer.Option(None, "--api-key", help="Anthropic API key"),
-    model: str = typer.Option("claude-opus-4-6", "--model", "-m", help="Default model"),
+    joiner_token: Optional[str] = typer.Option(None, "--joiner-token", help="Joiner token (machines/workers credential)"),
+    token: Optional[str] = typer.Option(None, "--token", "-t", help="Alias for --joiner-token (legacy)"),
+    api_key: Optional[str] = typer.Option(None, "--api-key", help="Override Anthropic API key (default: pull from server)"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Override default model (default: pull from server)"),
     name: Optional[str] = typer.Option(None, "--name", help="Machine name (defaults to hostname)"),
     skip_bootstrap: bool = typer.Option(False, "--skip-bootstrap", help="Skip system deps install"),
     skip_daemon: bool = typer.Option(False, "--skip-daemon", help="Skip starting the machine-agent daemon"),
 ):
     """Register this machine as a fleet host.
 
-    Saves the server URL, token, and API key to ~/.cfleet/config.yml, then
-    starts the machine-agent daemon so the fleet server can spawn workers
-    on this host. After this returns, the machine shows up in `cfleet machine ls`
-    on the operator side.
+    Saves the server URL + joiner token to ~/.cfleet/config.yml, pulls the
+    canonical Anthropic API key + default model from the server's bootstrap
+    endpoint, then starts the machine-agent daemon so the server can spawn
+    workers on this host.
 
-    On Linux with systemd the agent is installed as `cfleet-machine-agent.service`.
-    On macOS / other platforms the daemon must be started manually after `join`;
-    the exact command is printed at the end.
+    The Anthropic key is *not* prompted for or supplied via flag in the
+    normal flow — the server is the canonical store. Override with --api-key
+    only if you need a different key for this host specifically.
 
-    For a CLI-only operator setup (no daemon), use `cfleet connect` instead.
+    For a CLI-only operator setup (no daemon, no joiner role), use
+    `cfleet connect` instead.
     """
+    import json as _json
     import platform
+    import urllib.error
+    import urllib.request
     from cfleet.config import FleetConfig, FLEET_DIR
 
     try:
@@ -1076,21 +1328,54 @@ def join(
         FLEET_DIR.mkdir(parents=True, exist_ok=True)
         cfg = FleetConfig()
 
-    effective_api_key = api_key or cfg.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+    effective_token = joiner_token or token
+    if not effective_token:
+        console.print("[red]--joiner-token (or legacy --token) is required.[/red]")
+        raise typer.Exit(1)
 
+    server_url = server_url.rstrip("/")
+
+    # Pull canonical secrets from the server using the joiner credential.
+    pulled_api_key = ""
+    pulled_model = ""
+    try:
+        req = urllib.request.Request(
+            f"{server_url}/api/config/bootstrap",
+            headers={"Authorization": f"Bearer {effective_token}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read())
+        pulled_api_key = data.get("anthropic_api_key", "")
+        pulled_model = data.get("model", "")
+        console.print(f"[green]Pulled bootstrap config from {server_url}[/green]")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        console.print(f"[red]Server returned {e.code}: {detail}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Could not fetch bootstrap config: {e}[/red]")
+        raise typer.Exit(1)
+
+    effective_api_key = api_key or pulled_api_key or cfg.resolve_anthropic_key() or os.environ.get("ANTHROPIC_API_KEY", "")
     if not effective_api_key:
-        effective_api_key = typer.prompt("Anthropic API key", hide_input=True)
+        console.print("[red]No Anthropic API key returned from server and none configured locally.[/red]")
+        raise typer.Exit(1)
+
+    effective_model = model or pulled_model or cfg.resolve_model() or "claude-opus-4-6"
 
     if not skip_bootstrap:
         from cfleet.provisioner import local_bootstrap
-        local_bootstrap(api_key=effective_api_key, model=model)
+        local_bootstrap(api_key=effective_api_key, model=effective_model)
 
-    cfg.server.url = server_url.rstrip("/")
-    if token:
-        cfg.server.token = token
-    if effective_api_key:
-        cfg.anthropic_api_key = effective_api_key
-    cfg.model = model
+    cfg.server.url = server_url
+    cfg.server.joiner_token = effective_token
+    # Mirror into the legacy field so older code that reads server.token keeps working.
+    cfg.server.token = effective_token
+    cfg.secrets.anthropic_api_key = effective_api_key
+    cfg.secrets.model = effective_model
+    # Clear the legacy top-level field so resolve_anthropic_key returns the new one.
+    cfg.anthropic_api_key = ""
+    cfg.model = effective_model
     cfg.save()
 
     console.print(f"[green]Saved fleet config -> {server_url}[/green]")
@@ -1183,9 +1468,12 @@ def agent(
 
     workspace = str(Path(workspace).resolve())
 
-    api_key = cfg.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+    # Pull the canonical Anthropic key from the server on every spawn so a
+    # rotation via `cfleet secret set anthropic` takes effect without a
+    # config sync. Falls back to cached config on network errors.
+    api_key = _resolve_anthropic_key_fresh(cfg)
     if api_key:
-        os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
+        os.environ["ANTHROPIC_API_KEY"] = api_key
 
     # Surface fleet identity to child processes (git's credential.helper, etc.)
     os.environ["CFLEET_SERVER_URL"] = effective_server_url
@@ -1829,11 +2117,11 @@ def attach(
         raise typer.Exit(rc)
 
     # Local exec path
-    model = worker.get("model") or cfg.model or "claude-opus-4-6"
-    api_key = cfg.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+    model = worker.get("model") or cfg.resolve_model() or "claude-opus-4-6"
+    api_key = _resolve_anthropic_key_fresh(cfg)
     env = os.environ.copy()
     if api_key:
-        env.setdefault("ANTHROPIC_API_KEY", api_key)
+        env["ANTHROPIC_API_KEY"] = api_key
 
     encoded_cwd = workspace.replace("/", "-")
     lock_path = Path.home() / ".claude" / "projects" / encoded_cwd / f"{session_id}.lock"
