@@ -648,7 +648,15 @@ def connect(
     server_url: str = typer.Argument(..., help="Server URL (e.g. http://my-server:8420)"),
     token: Optional[str] = typer.Option(None, "--token", "-t", help="Server token for authentication"),
 ):
-    """Connect this CLI to a remote fleet server."""
+    """Point this CLI at a fleet server (operator mode).
+
+    Saves server URL + token to ~/.cfleet/config.yml so that `cfleet ls`,
+    `cfleet spawn`, `cfleet attach`, etc. talk to that fleet. Use this on a
+    laptop or CI box that runs the cfleet CLI but doesn't itself host workers.
+
+    For machines that should host workers (i.e. expose themselves as targets
+    the fleet can spawn agents on), use `cfleet join` instead.
+    """
     from cfleet.config import FleetConfig
 
     try:
@@ -700,6 +708,89 @@ def tui():
 
 
 # --------------------------------------------------------------------------
+# cfleet join — daemon helpers
+# --------------------------------------------------------------------------
+
+def _has_systemd() -> bool:
+    """True iff systemd is the active init on this host (Linux only)."""
+    import platform
+    import shutil as _shutil
+    if platform.system() != "Linux":
+        return False
+    if not _shutil.which("systemctl"):
+        return False
+    # systemctl exists on macOS as a noop wrapper in some homebrew installs;
+    # `is-system-running` is a definitive runtime check.
+    import subprocess
+    try:
+        subprocess.run(
+            ["systemctl", "is-system-running"],
+            capture_output=True,
+            timeout=3,
+            check=False,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _install_machine_agent_systemd(machine_name: str) -> bool:
+    """Install + enable cfleet-machine-agent.service. Returns True on success.
+
+    Uses sudo if the current user isn't root. Idempotent.
+    """
+    import shutil as _shutil
+    import subprocess
+
+    cfleet_bin = _shutil.which("cfleet") or "/usr/local/bin/cfleet"
+    user = os.environ.get("USER", "")
+    home = os.environ.get("HOME", "")
+
+    unit = f"""\
+[Unit]
+Description=Claude Fleet machine agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={user}
+WorkingDirectory={home}
+Environment=HOME={home}
+Environment=PATH={home}/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart={cfleet_bin} machine agent --name {machine_name}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+    sudo = [] if os.geteuid() == 0 else ["sudo"]
+    try:
+        # Write the unit
+        p = subprocess.run(
+            [*sudo, "tee", "/etc/systemd/system/cfleet-machine-agent.service"],
+            input=unit,
+            text=True,
+            capture_output=True,
+        )
+        if p.returncode != 0:
+            console.print(f"[yellow]Could not write systemd unit: {p.stderr.strip()}[/yellow]")
+            return False
+        subprocess.run([*sudo, "systemctl", "daemon-reload"], check=True, capture_output=True)
+        subprocess.run(
+            [*sudo, "systemctl", "enable", "--now", "cfleet-machine-agent.service"],
+            check=True,
+            capture_output=True,
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        console.print(f"[yellow]systemd setup failed: {e.stderr.decode() if e.stderr else e}[/yellow]")
+        return False
+
+
+# --------------------------------------------------------------------------
 # cfleet join
 # --------------------------------------------------------------------------
 
@@ -709,13 +800,24 @@ def join(
     token: Optional[str] = typer.Option(None, "--token", "-t", help="Server token"),
     api_key: Optional[str] = typer.Option(None, "--api-key", help="Anthropic API key"),
     model: str = typer.Option("claude-opus-4-6", "--model", "-m", help="Default model"),
+    name: Optional[str] = typer.Option(None, "--name", help="Machine name (defaults to hostname)"),
     skip_bootstrap: bool = typer.Option(False, "--skip-bootstrap", help="Skip system deps install"),
+    skip_daemon: bool = typer.Option(False, "--skip-daemon", help="Skip starting the machine-agent daemon"),
 ):
-    """Join the fleet — save server config and optionally bootstrap this machine.
+    """Register this machine as a fleet host.
 
-    Saves the server URL, token, and API key to ~/.cfleet/config.yml.
-    Use `cfleet agent <name>` afterwards to start a worker.
+    Saves the server URL, token, and API key to ~/.cfleet/config.yml, then
+    starts the machine-agent daemon so the fleet server can spawn workers
+    on this host. After this returns, the machine shows up in `cfleet machine ls`
+    on the operator side.
+
+    On Linux with systemd the agent is installed as `cfleet-machine-agent.service`.
+    On macOS / other platforms the daemon must be started manually after `join`;
+    the exact command is printed at the end.
+
+    For a CLI-only operator setup (no daemon), use `cfleet connect` instead.
     """
+    import platform
     from cfleet.config import FleetConfig, FLEET_DIR
 
     try:
@@ -741,8 +843,30 @@ def join(
     cfg.model = model
     cfg.save()
 
-    console.print(f"[green]Joined fleet at {server_url}[/green]")
-    console.print("[dim]Run 'cfleet agent <name>' to start a worker.[/dim]")
+    console.print(f"[green]Saved fleet config -> {server_url}[/green]")
+
+    if skip_daemon:
+        console.print("[dim]--skip-daemon set; start the agent manually with `cfleet machine agent`.[/dim]")
+        return
+
+    machine_name = name or platform.node()
+
+    if _has_systemd():
+        if _install_machine_agent_systemd(machine_name):
+            console.print(f"[green]Started cfleet-machine-agent.service ({machine_name})[/green]")
+            console.print("[dim]Check status:  sudo systemctl status cfleet-machine-agent.service[/dim]")
+            console.print("[dim]Tail logs:     sudo journalctl -u cfleet-machine-agent -f[/dim]")
+        else:
+            console.print(
+                "[yellow]Falling back to manual start; run:[/yellow]\n"
+                f"  cfleet machine agent --name {machine_name}"
+            )
+    else:
+        console.print(
+            "[dim]No systemd detected. Start the agent in another terminal "
+            "(or via launchd/screen/tmux):[/dim]\n"
+            f"  cfleet machine agent --name {machine_name}"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -1321,7 +1445,12 @@ def _read_session_messages(jsonl_path: str, offset: int = 0, limit: int = 200) -
 
 @app.command()
 def leave():
-    """Disconnect this machine from the fleet server."""
+    """Stop hosting workers and clear fleet config on this machine.
+
+    Stops + disables the machine-agent systemd unit (if installed) and clears
+    the server URL/token from ~/.cfleet/config.yml. The reverse of `cfleet join`.
+    """
+    import subprocess
     from cfleet.config import FleetConfig
 
     try:
@@ -1329,6 +1458,24 @@ def leave():
     except FileNotFoundError:
         console.print("[red]Not configured. Nothing to leave.[/red]")
         raise typer.Exit(1)
+
+    if _has_systemd():
+        sudo = [] if os.geteuid() == 0 else ["sudo"]
+        try:
+            subprocess.run(
+                [*sudo, "systemctl", "disable", "--now", "cfleet-machine-agent.service"],
+                capture_output=True,
+                check=False,
+            )
+            subprocess.run(
+                [*sudo, "rm", "-f", "/etc/systemd/system/cfleet-machine-agent.service"],
+                capture_output=True,
+                check=False,
+            )
+            subprocess.run([*sudo, "systemctl", "daemon-reload"], capture_output=True, check=False)
+            console.print("[dim]Stopped cfleet-machine-agent.service.[/dim]")
+        except Exception:
+            pass
 
     old_url = cfg.server.url
     cfg.server.url = ""
