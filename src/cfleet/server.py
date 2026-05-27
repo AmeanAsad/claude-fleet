@@ -484,6 +484,7 @@ def create_server_app() -> FastAPI:
         reg_model = reg.get("model", "")
         reg_ssh_host = reg.get("ssh_host", "")
         reg_ssh_user = reg.get("ssh_user", "")
+        reg_skip_perms = reg.get("skip_permissions", True)
 
         cw = await _hub.register(ws, worker_name, machine_name)
 
@@ -510,6 +511,7 @@ def create_server_app() -> FastAPI:
                 w.cwd = reg_cwd
             if reg_model:
                 w.model = reg_model
+            w.skip_permissions = bool(reg_skip_perms)
 
             # Register / refresh the machine record so `cfleet attach` can find SSH info.
             # Only touch ssh fields / status when the machine is "external" (BYO via
@@ -886,6 +888,7 @@ def create_server_app() -> FastAPI:
             "model": body.get("model", ""),
             "repos": body.get("repos", []),
             "cwd": body.get("cwd", ""),
+            "skip_permissions": bool(body.get("skip_permissions", True)),
         })
         return result
 
@@ -956,6 +959,7 @@ def create_server_app() -> FastAPI:
             "last_prompt_at": worker.last_prompt_at,
             "session_id": worker.session_id,
             "cwd": worker.cwd,
+            "skip_permissions": worker.skip_permissions,
             "connected": connected,
         }
         if machine:

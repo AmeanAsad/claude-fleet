@@ -793,6 +793,7 @@ def spawn(
     region: Optional[str] = typer.Option(None, "--region", help="Override default region (auto-create only)"),
     provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Provider for auto-created machine"),
     gh: Optional[str] = typer.Option(None, "--gh", help="GitHub access level: read, triage, or write"),
+    skip_permissions: bool = typer.Option(True, "--skip-permissions/--no-skip-permissions", help="Run with --dangerously-skip-permissions (default: on)"),
 ):
     """Spawn a new fleet worker on a machine."""
     from cfleet.config import GitHubLevel, VMType
@@ -815,6 +816,7 @@ def spawn(
         region=region,
         provider=provider,
         cwd=cwd,
+        skip_permissions=skip_permissions,
     )
 
     if gh:
@@ -1576,6 +1578,7 @@ def agent(
     token: Optional[str] = typer.Option(None, "--token", "-t", help="Server token"),
     ssh_host: Optional[str] = typer.Option(None, "--ssh-host", help="Public SSH target (host[:port]) others can reach this machine on"),
     ssh_user: Optional[str] = typer.Option(None, "--ssh-user", help="SSH login user (defaults to $USER)"),
+    skip_permissions: bool = typer.Option(True, "--skip-permissions/--no-skip-permissions", help="Run with --dangerously-skip-permissions (default: on)"),
 ):
     """Start a headless Claude Code worker registered with the fleet.
 
@@ -1714,6 +1717,7 @@ def agent(
             cwd=workspace,
             ssh_host=effective_ssh_host,
             ssh_user=effective_ssh_user,
+            skip_permissions=skip_permissions,
         ))
     except KeyboardInterrupt:
         pass
@@ -1728,12 +1732,13 @@ def agent(
 class _AgentRuntime:
     """Per-process runtime state for `cfleet agent`."""
 
-    def __init__(self, session_id: str, jsonl_path: str, lock_path: str, model: str, cwd: str):
+    def __init__(self, session_id: str, jsonl_path: str, lock_path: str, model: str, cwd: str, skip_permissions: bool = True):
         self.session_id = session_id
         self.jsonl_path = jsonl_path
         self.lock_path = lock_path
         self.model = model
         self.cwd = cwd
+        self.skip_permissions = skip_permissions
         self.status: str = "idle"  # idle | working | paused
         self.current_task = None
         self.has_session = False  # set True once first SDK turn writes the JSONL
@@ -1801,13 +1806,14 @@ async def _agent_ws_loop(
     cwd: str,
     ssh_host: str = "",
     ssh_user: str = "",
+    skip_permissions: bool = True,
 ):
     """WebSocket client: registers, handles commands, runs SDK, tails JSONL."""
     import asyncio
     import json
     import websockets
 
-    runtime = _AgentRuntime(session_id, jsonl_path, lock_path, model, cwd)
+    runtime = _AgentRuntime(session_id, jsonl_path, lock_path, model, cwd, skip_permissions=skip_permissions)
     _write_lock(lock_path, "relay")
 
     ws_url = server_url.replace("http://", "ws://").replace("https://", "wss://") + "/ws"
@@ -1826,6 +1832,7 @@ async def _agent_ws_loop(
                     "model": model,
                     "ssh_host": ssh_host,
                     "ssh_user": ssh_user,
+                    "skip_permissions": skip_permissions,
                 }))
 
                 reg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
@@ -2032,7 +2039,7 @@ async def _agent_run_sdk(ws, runtime: "_AgentRuntime", prompt: str) -> None:
         kwargs = dict(
             model=runtime.model,
             cwd=runtime.cwd,
-            permission_mode="bypassPermissions",
+            permission_mode="bypassPermissions" if runtime.skip_permissions else "default",
             allowed_tools=["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "WebFetch"],
         )
         if runtime.has_session:
@@ -2225,6 +2232,7 @@ def leave():
 def attach(
     name: str = typer.Argument(..., help="Worker name"),
     local: bool = typer.Option(False, "--local", help="Force local exec (skip SSH); used internally when SSH'd in"),
+    skip_permissions: Optional[bool] = typer.Option(None, "--skip-permissions/--no-skip-permissions", help="Override worker's permission mode for this attach session"),
 ):
     """Drop into a `claude` TUI on the worker's session.
 
@@ -2309,7 +2317,12 @@ def attach(
         # argv[2:] with spaces on the remote, so the whole `bash -lc ...`
         # invocation must arrive as a single shell-token to keep the -lc
         # argument intact.
-        remote_cmd = f"bash -lc 'cfleet attach {name} --local'"
+        skip_flag = ""
+        if skip_permissions is True:
+            skip_flag = " --skip-permissions"
+        elif skip_permissions is False:
+            skip_flag = " --no-skip-permissions"
+        remote_cmd = f"bash -lc 'cfleet attach {name} --local{skip_flag}'"
         rc = subprocess.run(["ssh", "-t", target, remote_cmd]).returncode
         raise typer.Exit(rc)
 
@@ -2344,15 +2357,18 @@ def attach(
         console.print("[red]`claude` CLI not found on PATH or in common install dirs.[/red]")
         raise typer.Exit(1)
 
+    # Use the attach-time override if given; otherwise fall back to the
+    # permission mode the worker registered with (default True).
+    effective_skip = skip_permissions if skip_permissions is not None else bool(worker.get("skip_permissions", True))
+
     _write_lock(str(lock_path), "tui")
     our_pid = os.getpid()
     console.print(f"[dim]Lock acquired. Launching claude --resume on session {session_id[:8]}...[/dim]")
+    claude_cmd = [claude_bin, "--resume", session_id, "--model", model]
+    if effective_skip:
+        claude_cmd.append("--dangerously-skip-permissions")
     try:
-        subprocess.run(
-            [claude_bin, "--resume", session_id, "--model", model],
-            cwd=workspace,
-            env=env,
-        )
+        subprocess.run(claude_cmd, cwd=workspace, env=env)
     finally:
         if _release_lock_if_owner(str(lock_path), "tui", our_pid, "relay"):
             console.print("[dim]Detached. Dashboard control restored.[/dim]")

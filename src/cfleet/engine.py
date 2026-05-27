@@ -334,6 +334,7 @@ class FleetEngine:
         instance_type: str | None = None,
         region: str | None = None,
         cwd: str | None = None,
+        skip_permissions: bool = True,
     ) -> WorkerState:
         """Spawn a new worker on a machine. Auto-creates machine if needed."""
         if name in self.state.workers:
@@ -381,7 +382,7 @@ class FleetEngine:
         else:
             # All other machines (external + cloud) self-register their
             # machine-agent, so spawning goes through the same WS path.
-            self._spawn_worker_external(worker, machine, effective_model, repo_configs, cwd=cwd)
+            self._spawn_worker_external(worker, machine, effective_model, repo_configs, cwd=cwd, skip_permissions=skip_permissions)
 
         worker.status = "idle"
         self._save_state()
@@ -416,12 +417,14 @@ class FleetEngine:
     def _spawn_worker_external(
         self, worker: WorkerState, machine: MachineState, model: str, repos: list[dict],
         cwd: str | None = None,
+        skip_permissions: bool = True,
     ) -> None:
         console.print(f"Sending spawn to external machine [bold]{machine.name}[/bold]...")
         payload: dict = {
             "worker_name": worker.name,
             "model": model,
             "repos": repos,
+            "skip_permissions": skip_permissions,
         }
         if cwd:
             payload["cwd"] = cwd

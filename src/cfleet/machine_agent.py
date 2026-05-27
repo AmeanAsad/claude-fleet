@@ -223,6 +223,7 @@ class MachineAgent:
         repos = data.get("repos", [])
         raw_cwd = data.get("cwd", "")
         cwd = os.path.abspath(os.path.expanduser(raw_cwd)) if raw_cwd else ""
+        skip_permissions = bool(data.get("skip_permissions", True))
 
         if worker_name in self.workers:
             await ws.send(json.dumps({
@@ -272,6 +273,7 @@ class MachineAgent:
                 "--model", model,
                 "--server-url", self.server_url,
                 "--token", self.token,
+                "--skip-permissions" if skip_permissions else "--no-skip-permissions",
             ]
 
             proc = subprocess.Popen(cmd, env=env)
