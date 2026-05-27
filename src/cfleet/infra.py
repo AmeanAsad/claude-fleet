@@ -233,7 +233,13 @@ class InfraManager:
                     pass
 
     def add_machine(self, name: str, machine_cfg: dict) -> dict:
-        """Add a machine to the Pulumi config and run up. Returns outputs."""
+        """Add a machine to the Pulumi config and run up. Returns outputs.
+
+        Skips the global pre-`up` refresh: a refresh asks every provider
+        about every resource, so a single expired credential or a stale
+        unrelated resource aborts the whole operation. Drift reconciliation
+        is the job of `cfleet machine doctor`, not of routine adds.
+        """
         stack = self._get_stack()
         machines = self._machines_from_state()
         machines[name] = machine_cfg
@@ -241,7 +247,6 @@ class InfraManager:
         self._apply_config(stack, machines)
 
         def _up():
-            stack.refresh(on_output=lambda msg: None)
             result = stack.up(on_output=lambda msg: None)
             return {k: v.value for k, v in result.outputs.items()}
 
@@ -255,7 +260,6 @@ class InfraManager:
         self._apply_config(stack, machines)
 
         def _up():
-            stack.refresh(on_output=lambda msg: None)
             stack.up(on_output=lambda msg: None)
 
         self._run_with_timeout(_up)
