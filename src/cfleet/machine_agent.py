@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import platform
+import shutil
 import signal
 import subprocess
 import sys
@@ -47,12 +48,18 @@ class MachineAgent:
         )
 
     def _system_info(self) -> dict:
+        # Best-effort SSH info so the server can wire up `cfleet attach` for
+        # this machine. Empty values are ignored by the server.
+        ssh_user = os.environ.get("USER", "")
+        ssh_host = os.environ.get("CFLEET_SSH_HOST", "")
         return {
             "hostname": platform.node(),
             "os": f"{platform.system()} {platform.release()}",
             "arch": platform.machine(),
             "python": platform.python_version(),
             "cpus": os.cpu_count() or 1,
+            "ssh_user": ssh_user,
+            "ssh_host": ssh_host,
         }
 
     async def run(self) -> None:
@@ -169,7 +176,7 @@ class MachineAgent:
             if not workspace:
                 worker_dir = local_provision_worker(
                     worker_name=worker_name,
-                    relay_port=self._next_port,
+                    relay_port=0,
                     model=model,
                     repos=repos,
                     fleet_config=config,
@@ -177,25 +184,19 @@ class MachineAgent:
             else:
                 worker_dir = cwd
 
-            relay_script = self._find_relay_script()
-            port = self._next_port
-            self._next_port += 1
-
             env = os.environ.copy()
             env["ANTHROPIC_API_KEY"] = self.api_key or config.anthropic_api_key
             env["CLAUDE_CODE_API_KEY"] = env["ANTHROPIC_API_KEY"]
-            env["CFLEET_MODEL"] = model
 
+            # Resolve the cfleet binary. machine_agent itself runs from a cfleet
+            # install, so cfleet is on PATH (or alongside this interpreter).
+            cfleet_bin = shutil.which("cfleet") or "cfleet"
             cmd = [
-                sys.executable, relay_script,
-                "--port", str(port),
-                "--host", "127.0.0.1",
-                "--model", model,
+                cfleet_bin, "agent", worker_name,
                 "--cwd", worker_dir,
+                "--model", model,
                 "--server-url", self.server_url,
                 "--token", self.token,
-                "--worker-name", worker_name,
-                "--machine-name", self.machine_name,
             ]
 
             proc = subprocess.Popen(cmd, env=env)
@@ -204,7 +205,7 @@ class MachineAgent:
             await ws.send(json.dumps({
                 "type": "response",
                 "request_id": request_id,
-                "data": {"ok": True, "worker_name": worker_name, "relay_port": port},
+                "data": {"ok": True, "worker_name": worker_name},
             }))
 
         except Exception as e:
@@ -240,17 +241,6 @@ class MachineAgent:
             "request_id": request_id,
             "data": {"ok": True, "worker_name": worker_name},
         }))
-
-    def _find_relay_script(self) -> str:
-        candidates = [
-            Path("/opt/cfleet-relay/worker_relay.py"),
-            Path.home() / ".cfleet" / "relay" / "worker_relay.py",
-            Path(__file__).parent / "worker_relay.py",
-        ]
-        for c in candidates:
-            if c.exists():
-                return str(c)
-        raise FileNotFoundError("worker_relay.py not found")
 
     def _handle_signal(self) -> None:
         self._shutdown = True

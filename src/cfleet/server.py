@@ -557,23 +557,37 @@ def create_server_app() -> FastAPI:
         cm = await _machine_hub.register(ws, machine_name, system_info)
         cm.worker_names = worker_names
 
-        # Create or update machine in state
+        # Create or update machine in state. For an unknown machine we treat
+        # it as "external" (BYO laptop). For an existing record (e.g. cloud
+        # VM created by `cfleet machine create`) we preserve the provider and
+        # only fill in fields the agent reported, never blanking real values.
+        reg_ssh_host = system_info.get("ssh_host", "")
+        reg_ssh_user = system_info.get("ssh_user", "")
         try:
             state = FleetState.load()
             if machine_name not in state.machines:
                 from cfleet.config import MachineState
                 machine = MachineState(
                     name=machine_name,
+                    provider="external",
                     hostname=system_info.get("hostname", ""),
                     os_info=system_info.get("os", ""),
+                    ssh_host=reg_ssh_host,
+                    ssh_user=reg_ssh_user,
                     status="ready",
                 )
                 state.add_machine(machine)
             else:
-                machine = state.machines[machine_name]
-                machine.hostname = system_info.get("hostname", "")
-                machine.os_info = system_info.get("os", "")
-                machine.status = "ready"
+                m = state.machines[machine_name]
+                if system_info.get("hostname"):
+                    m.hostname = system_info["hostname"]
+                if system_info.get("os"):
+                    m.os_info = system_info["os"]
+                if reg_ssh_host:
+                    m.ssh_host = reg_ssh_host
+                if reg_ssh_user:
+                    m.ssh_user = reg_ssh_user
+                m.status = "ready"
             state.save()
         except Exception:
             pass

@@ -170,6 +170,8 @@ class FleetConfig(BaseModel):
     cloud: CloudConfig = CloudConfig()
     server: ServerConfig = ServerConfig()
     github: GitHubConfig = GitHubConfig()
+    repo_url: str = "https://github.com/AmeanAsad/claude-fleet.git"
+    repo_branch: str = "fleat/v2-fleet"
 
     @classmethod
     def load(cls, path: Path | None = None) -> FleetConfig:

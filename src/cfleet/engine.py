@@ -234,47 +234,62 @@ class FleetEngine:
             f"SKU: [bold]{effective_instance_type}[/bold]"
         )
 
-        console.print(f"Creating VM [bold]{name}[/bold]...")
-        machine_cfg = {
-            "instance_type": effective_instance_type,
-            "vm_type": effective_vm_type.value,
-            "provider": provider_name,
-        }
-        if region:
-            if provider_name == "gcp":
-                machine_cfg["zone"] = region
-            else:
-                machine_cfg["region"] = region
-            machine.region = region
+        try:
+            console.print(f"Creating VM [bold]{name}[/bold]...")
+            machine_cfg = {
+                "instance_type": effective_instance_type,
+                "vm_type": effective_vm_type.value,
+                "provider": provider_name,
+            }
+            if region:
+                if provider_name == "gcp":
+                    machine_cfg["zone"] = region
+                else:
+                    machine_cfg["region"] = region
+                machine.region = region
 
-        outputs = self.infra.add_machine(name, machine_cfg)
-        ip = outputs.get(f"{name}_ip", "")
-        if not ip:
-            machine.status = "errored"
+            outputs = self.infra.add_machine(name, machine_cfg)
+            ip = outputs.get(f"{name}_ip", "")
+            if not ip:
+                raise RuntimeError(f"Pulumi did not return an IP for {name}")
+
+            machine.ip = ip
+            machine.status = "provisioning"
             self._save_state()
-            raise RuntimeError(f"Pulumi did not return an IP for {name}")
 
-        machine.ip = ip
-        machine.status = "provisioning"
-        self._save_state()
+            from cfleet.ssh import wait_for_ssh
+            console.print(f"Waiting for SSH on {ip}...")
+            wait_for_ssh(ip, effective_ssh_user, str(self.config.resolve_ssh_key()))
 
-        from cfleet.ssh import wait_for_ssh
-        console.print(f"Waiting for SSH on {ip}...")
-        wait_for_ssh(ip, effective_ssh_user, str(self.config.resolve_ssh_key()))
+            from cfleet.provisioner import bootstrap_machine
+            console.print(f"Bootstrapping [bold]{name}[/bold]...")
+            bootstrap_machine(
+                ip=ip,
+                user=effective_ssh_user,
+                key_path=str(self.config.resolve_ssh_key()),
+                fleet_config=self.config,
+                machine_name=name,
+            )
 
-        from cfleet.provisioner import bootstrap_machine
-        console.print(f"Bootstrapping [bold]{name}[/bold]...")
-        bootstrap_machine(
-            ip=ip,
-            user=effective_ssh_user,
-            key_path=str(self.config.resolve_ssh_key()),
-            fleet_config=self.config,
-        )
-
-        machine.status = "ready"
-        self._save_state()
-        console.print(f"[green]Machine {name} ready at {ip}[/green]")
-        return machine
+            machine.status = "ready"
+            self._save_state()
+            console.print(f"[green]Machine {name} ready at {ip}[/green]")
+            return machine
+        except Exception:
+            # Roll the cfleet record back so the user can retry without `--purge`.
+            # The Pulumi side may have partial resources; surface that to the user
+            # but don't block retries on a stale cfleet record.
+            console.print(
+                f"[yellow]Create failed — rolling back cfleet record for '{name}'. "
+                f"If Pulumi created resources, run `cfleet machine doctor` (coming) "
+                f"or clean up manually via the Pulumi state.[/yellow]"
+            )
+            try:
+                self.state.remove_machine(name)
+                self._save_state()
+            except Exception:
+                pass
+            raise
 
     def remove_machine(self, name: str, keep_vm: bool = False, purge: bool = False) -> None:
         """Remove a machine and all its workers. Always removes from state.
@@ -361,12 +376,12 @@ class FleetEngine:
 
         repo_configs = [r.model_dump() for r in self.config.repos if r.name in effective_repos]
 
-        if machine.provider == "external":
-            self._spawn_worker_external(worker, machine, effective_model, repo_configs, cwd=cwd)
-        elif machine.provider == "devcontainer":
+        if machine.provider == "devcontainer":
             self._spawn_worker_devcontainer(worker, machine, effective_model, repo_configs)
         else:
-            self._spawn_worker_cloud(worker, machine, effective_model, repo_configs)
+            # All other machines (external + cloud) self-register their
+            # machine-agent, so spawning goes through the same WS path.
+            self._spawn_worker_external(worker, machine, effective_model, repo_configs, cwd=cwd)
 
         worker.status = "idle"
         self._save_state()
@@ -407,27 +422,6 @@ class FleetEngine:
         result = self._api_post(f"/api/machines/{machine.name}/spawn", payload)
         if "error" in result:
             raise RuntimeError(f"Remote spawn failed: {result['error']}")
-
-    def _spawn_worker_cloud(
-        self, worker: WorkerState, machine: MachineState, model: str, repos: list[dict]
-    ) -> None:
-        from cfleet.provisioner import provision_worker
-
-        ssh_user = machine.ssh_user or self.config.resolve_ssh_user(provider=machine.provider)
-        console.print(f"Provisioning worker [bold]{worker.name}[/bold] on {machine.name}...")
-
-        provision_worker(
-            ip=machine.ip,
-            user=ssh_user,
-            key_path=str(self.config.resolve_ssh_key()),
-            worker_name=worker.name,
-            relay_port=worker.relay_port,
-            model=model,
-            repos=repos,
-            fleet_config=self.config,
-            machine_name=machine.name,
-            github_level=worker.github_level,
-        )
 
     # ------------------------------------------------------------------
     # kill (worker)
