@@ -164,12 +164,6 @@ def _stage_files(
     staging_dir = f"/tmp/cfleet-staging-{staging_name}"
     ssh_run(ip, user, key_path, f"mkdir -p {staging_dir}")
 
-    module_dir = Path(__file__).parent
-    for script_name in ("worker_relay.py", "credential_helper.py"):
-        script = module_dir / script_name
-        if script.exists():
-            rsync_to(ip, user, key_path, str(script), "/tmp/cfleet-staging")
-
     skills_dir = fleet_config.resolve_skills_dir()
     if skills_dir.exists():
         rsync_to(ip, user, key_path, str(skills_dir), f"{staging_dir}/skills")
@@ -299,34 +293,6 @@ def local_bootstrap(api_key: str, model: str) -> None:
     if ".local/bin" not in bashrc_text:
         with open(bashrc, "a") as f:
             f.write(f'\nexport PATH="{home}/.local/bin:$PATH"\n')
-
-    print("==> Installing relay Python dependencies...")
-    try:
-        _run(["pip3", "install", "--break-system-packages", "--quiet",
-              "claude-code-sdk", "httpx", "fastapi", "uvicorn", "sse-starlette",
-              "pydantic", "PyJWT", "cryptography", "websockets"])
-    except subprocess.CalledProcessError:
-        _run(["pip3", "install", "--quiet",
-              "claude-code-sdk", "httpx", "fastapi", "uvicorn", "sse-starlette",
-              "pydantic", "PyJWT", "cryptography", "websockets"])
-
-    print("==> Deploying relay scripts...")
-    relay_dir = Path("/opt/cfleet-relay")
-    module_dir = Path(__file__).parent
-    try:
-        _run(["sudo", "mkdir", "-p", str(relay_dir)])
-        for script_name in ("worker_relay.py", "credential_helper.py"):
-            src = module_dir / script_name
-            if src.exists():
-                _run(["sudo", "cp", str(src), str(relay_dir / script_name)])
-        _run(["sudo", "chown", "-R", f"{user}:{user}", str(relay_dir)])
-    except subprocess.CalledProcessError:
-        relay_dir = home / ".cfleet" / "relay"
-        relay_dir.mkdir(parents=True, exist_ok=True)
-        for script_name in ("worker_relay.py", "credential_helper.py"):
-            src = module_dir / script_name
-            if src.exists():
-                shutil.copy(src, relay_dir / script_name)
 
     print("==> Local bootstrap complete.")
 
