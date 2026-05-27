@@ -295,6 +295,7 @@ fi
 
 sudo /opt/cfleet/bin/pip install --quiet /opt/cfleet/src
 sudo ln -sf /opt/cfleet/bin/cfleet /usr/local/bin/cfleet
+sudo ln -sf /opt/cfleet/bin/cfleet-gh-token /usr/local/bin/cfleet-gh-token
 
 sudo mkdir -p /root/.cfleet
 # Move the github-app pem into place if we shipped one
