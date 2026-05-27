@@ -391,6 +391,12 @@ class FleetEngine:
     def _spawn_worker_devcontainer(
         self, worker: WorkerState, machine: MachineState, model: str, repos: list[dict]
     ) -> None:
+        raise RuntimeError(
+            "The devcontainer worker path is currently unsupported — it still "
+            "depends on the removed worker_relay.py runtime. Use a registered "
+            "external/cloud machine instead, or open an issue if you need "
+            "devcontainer support brought up to parity."
+        )
         from cfleet.devcontainer import docker_available, spawn_container
 
         if not docker_available():
