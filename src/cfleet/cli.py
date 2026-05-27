@@ -67,66 +67,15 @@ def _set_worker_gh_level(worker_name: str, level: str) -> None:
 
 
 def _wire_local_git_credential_helper(worker_name: str, cwd: str) -> None:
-    """Configure git in the worker's cwd to use cfleet-gh-token for github.com.
+    """No-op kept for callers; `cfleet agent` now passes the credential helper
+    inline via GIT_CONFIG_* env vars instead of editing user-global gitconfig.
 
-    Writes a worker-scoped fleet.gitconfig that git includes, so credentials
-    flow automatically when git/gh/claude in that directory tries to talk to
-    github. Idempotent — safe to re-run.
+    Editing the user's global gitconfig hijacked every github.com git
+    operation on the host (Issue #N): when CFLEET_SERVER_URL wasn't set in
+    the calling shell, the helper failed and git fell through to prompting
+    for a password. Process-scoped config via env vars avoids all that.
     """
-    import shutil
-    import subprocess
-    from cfleet.config import FleetConfig
-
-    helper_path = shutil.which("cfleet-gh-token")
-    if not helper_path:
-        console.print(
-            "[yellow]cfleet-gh-token not on PATH — install hasn't refreshed yet. "
-            "Reinstall cfleet (e.g. `uv tool install --force --reinstall .`).[/yellow]"
-        )
-        return
-
-    cfg = FleetConfig.load()
-    server_url = cfg.server.url
-    fleet_token = cfg.server.token
-    if not server_url or not fleet_token:
-        return
-
-    # Add the helper to the user's GLOBAL gitconfig for github.com. Git
-    # supports stacked helpers, so any existing helper (osxkeychain etc.)
-    # still runs first — ours only fires if the others didn't supply a
-    # credential. This is necessary because `git clone` outside an existing
-    # repo doesn't honor includeIf-scoped config.
-    try:
-        # Check if our helper is already configured to avoid duplicate adds.
-        existing = subprocess.run(
-            ["git", "config", "--global", "--get-all", "credential.https://github.com.helper"],
-            capture_output=True,
-            text=True,
-        )
-        helpers = existing.stdout.splitlines() if existing.returncode == 0 else []
-        if helper_path not in helpers:
-            subprocess.run(
-                ["git", "config", "--global", "--add", "credential.https://github.com.helper", helper_path],
-                check=False,
-                capture_output=True,
-            )
-        subprocess.run(
-            ["git", "config", "--global", "credential.https://github.com.useHttpPath", "true"],
-            check=False,
-            capture_output=True,
-        )
-    except FileNotFoundError:
-        console.print("[yellow]git is not installed; skipping credential helper wiring.[/yellow]")
-        return
-
-    console.print(
-        f"[dim]Wired git credential helper for {worker_name} in {cwd} "
-        f"(helper: {helper_path}).[/dim]"
-    )
-    console.print(
-        f"[dim]Worker process must have CFLEET_SERVER_URL/CFLEET_TOKEN/CFLEET_WORKER_NAME set "
-        f"— `cfleet agent` does this automatically.[/dim]"
-    )
+    return
 
 
 def _warn_branch_protection(repos: list[str]) -> None:
@@ -365,6 +314,53 @@ def machine_ssh(
     from cfleet.ssh import ssh_attach
     ssh_user = machine.ssh_user or engine.config.resolve_ssh_user(provider=machine.provider)
     ssh_attach(machine.ip, ssh_user, str(engine.config.resolve_ssh_key()))
+
+
+@machine_app.command("agent")
+def machine_agent_cmd(
+    name: Optional[str] = typer.Option(None, "--name", help="Machine name (defaults to hostname)"),
+    server_url: Optional[str] = typer.Option(None, "--server-url", "-s", help="Fleet server URL"),
+    token: Optional[str] = typer.Option(None, "--token", "-t", help="Fleet server token"),
+):
+    """Run the machine-agent daemon. Registers this host with the fleet server
+    and handles spawn/kill commands for workers running on it.
+
+    Usually started via systemd (set up by `cfleet machine create` on cloud VMs)
+    or manually via `cfleet join` on a laptop.
+    """
+    import asyncio
+    import platform
+    from cfleet.config import FleetConfig
+    from cfleet.machine_agent import MachineAgent
+
+    try:
+        cfg = FleetConfig.load()
+    except FileNotFoundError:
+        console.print("[red]Run 'cfleet join <server-url>' first.[/red]")
+        raise typer.Exit(1)
+
+    effective_server_url = server_url or cfg.server.url
+    effective_token = token or cfg.server.token
+    effective_name = name or platform.node()
+
+    if not effective_server_url or not effective_token:
+        console.print("[red]Missing server URL or token. Run 'cfleet join' or pass --server-url/--token.[/red]")
+        raise typer.Exit(1)
+
+    api_key = cfg.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        console.print("[red]ANTHROPIC_API_KEY missing — set it in ~/.cfleet/config.yml or env.[/red]")
+        raise typer.Exit(1)
+
+    agent = MachineAgent(
+        server_url=effective_server_url,
+        token=effective_token,
+        machine_name=effective_name,
+        api_key=api_key,
+        model=cfg.model,
+    )
+    console.print(f"Starting machine-agent [bold]{effective_name}[/bold] -> {effective_server_url}")
+    asyncio.run(agent.run())
 
 
 # --------------------------------------------------------------------------
@@ -821,6 +817,20 @@ def agent(
     os.environ["CFLEET_SERVER_URL"] = effective_server_url
     os.environ["CFLEET_TOKEN"] = effective_token
     os.environ["CFLEET_WORKER_NAME"] = name
+
+    # Wire cfleet-gh-token as a credential helper for github.com — but only
+    # for git processes descended from this `cfleet agent`. Using
+    # GIT_CONFIG_COUNT/KEY/VALUE keeps it process-scoped; no user-global
+    # gitconfig is touched, so `git pull` in unrelated repos isn't affected.
+    import shutil as _shutil
+    gh_helper = _shutil.which("cfleet-gh-token")
+    if gh_helper:
+        existing_count = int(os.environ.get("GIT_CONFIG_COUNT", "0") or 0)
+        os.environ["GIT_CONFIG_COUNT"] = str(existing_count + 2)
+        os.environ[f"GIT_CONFIG_KEY_{existing_count}"] = "credential.https://github.com.helper"
+        os.environ[f"GIT_CONFIG_VALUE_{existing_count}"] = gh_helper
+        os.environ[f"GIT_CONFIG_KEY_{existing_count + 1}"] = "credential.https://github.com.useHttpPath"
+        os.environ[f"GIT_CONFIG_VALUE_{existing_count + 1}"] = "true"
 
     session_id = str(uuid.uuid4())
     encoded_cwd = workspace.replace("/", "-")
