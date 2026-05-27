@@ -763,9 +763,9 @@ def shell(
 def send(
     name: str = typer.Argument(..., help="Worker name"),
     local_path: str = typer.Argument(..., help="Local path to send"),
-    to: str = typer.Option("/workspace/inbox/", "--to", help="Remote destination path"),
+    to: Optional[str] = typer.Option(None, "--to", help="Remote destination path (defaults to worker cwd)"),
 ):
-    """Send files to a worker via rsync."""
+    """Send files to a worker via rsync (or `docker cp` for devcontainer)."""
     engine = _engine()
     engine.send(name, local_path, to)
 
@@ -778,9 +778,9 @@ def send(
 def collect(
     name: str = typer.Argument(..., help="Worker name"),
     local_dest: str = typer.Argument(..., help="Local destination path"),
-    path: str = typer.Option("/workspace/outbox/", "--path", help="Remote path to collect"),
+    path: Optional[str] = typer.Option(None, "--path", help="Remote path to collect (defaults to worker cwd)"),
 ):
-    """Collect files from a worker via rsync."""
+    """Collect files from a worker via rsync (or `docker cp` for devcontainer)."""
     engine = _engine()
     engine.collect(name, local_dest, path)
 

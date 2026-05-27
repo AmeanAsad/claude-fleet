@@ -555,63 +555,79 @@ class FleetEngine:
             from cfleet.devcontainer import WorkerDocker
             docker = WorkerDocker(container_id=machine.container_id, relay_port=worker.relay_port)
             docker.attach()
-        elif machine.provider == "external":
+            return
+
+        # SSH for both cloud-provisioned and externally-joined machines. Both
+        # set machine.ssh_user; cloud machines have machine.ip, external
+        # machines have machine.ssh_host.
+        from cfleet.ssh import ssh_attach
+        host = machine.ssh_host or machine.ip
+        if not host:
             console.print(
-                f"[yellow]Machine '{machine.name}' is external (joined via 'cfleet join').[/yellow]\n"
-                f"[dim]Open a shell on that host directly; worker cwd is the path passed to 'cfleet agent --cwd'.[/dim]"
+                f"[red]No SSH host for machine '{machine.name}' "
+                f"(ssh_host/ip both empty).[/red]"
             )
-        else:
-            from cfleet.ssh import ssh_attach
-            ssh_user = machine.ssh_user or self.config.resolve_ssh_user(provider=machine.provider)
-            ssh_attach(machine.ip, ssh_user, str(self.config.resolve_ssh_key()))
+            return
+        ssh_user = machine.ssh_user or self.config.resolve_ssh_user(provider=machine.provider)
+        # If the worker has a cwd, land the shell there.
+        command = f"cd {worker.cwd!r} && exec bash -l" if worker.cwd else "bash -l"
+        ssh_attach(host, ssh_user, str(self.config.resolve_ssh_key()), command=command)
 
     # ------------------------------------------------------------------
     # send / collect — SSH / Docker (not via server)
     # ------------------------------------------------------------------
 
-    def send(self, name: str, local_path: str, remote_path: str = "/workspace/inbox/") -> None:
-        """Send files to a worker's machine via rsync."""
+    def send(self, name: str, local_path: str, remote_path: str | None = None) -> None:
+        """Send files to a worker's machine via rsync (or `docker cp` for devcontainer).
+
+        Defaults to the worker's cwd if `remote_path` isn't given.
+        """
         worker = self.state.get_worker(name)
         machine = self._get_machine_for_worker(worker)
+
+        effective_remote = remote_path or worker.cwd or "/workspace/inbox/"
 
         if machine.provider == "devcontainer":
             from cfleet.devcontainer import WorkerDocker
             docker = WorkerDocker(container_id=machine.container_id, relay_port=worker.relay_port)
-            docker.send_files(local_path, remote_path)
-        elif machine.provider == "external":
-            console.print(
-                f"[yellow]send/collect not supported for external machines.[/yellow]\n"
-                f"[dim]Copy files directly to/from the agent's --cwd on host '{machine.name}'.[/dim]"
-            )
+            docker.send_files(local_path, effective_remote)
+            console.print(f"Sent {local_path} to [bold]{name}[/bold]:{effective_remote}")
             return
-        else:
-            from cfleet.ssh import rsync_to
-            ssh_user = machine.ssh_user or self.config.resolve_ssh_user(provider=machine.provider)
-            rsync_to(machine.ip, ssh_user, str(self.config.resolve_ssh_key()), local_path, remote_path)
 
-        console.print(f"Sent {local_path} to [bold]{name}[/bold]:{remote_path}")
+        from cfleet.ssh import rsync_to
+        host = machine.ssh_host or machine.ip
+        if not host:
+            console.print(f"[red]No SSH host for machine '{machine.name}'.[/red]")
+            return
+        ssh_user = machine.ssh_user or self.config.resolve_ssh_user(provider=machine.provider)
+        rsync_to(host, ssh_user, str(self.config.resolve_ssh_key()), local_path, effective_remote)
+        console.print(f"Sent {local_path} to [bold]{name}[/bold]:{effective_remote}")
 
-    def collect(self, name: str, local_dest: str, remote_path: str = "/workspace/outbox/") -> None:
-        """Collect files from a worker's machine via rsync."""
+    def collect(self, name: str, local_dest: str, remote_path: str | None = None) -> None:
+        """Collect files from a worker's machine via rsync (or `docker cp` for devcontainer).
+
+        Defaults to the worker's cwd if `remote_path` isn't given.
+        """
         worker = self.state.get_worker(name)
         machine = self._get_machine_for_worker(worker)
+
+        effective_remote = remote_path or worker.cwd or "/workspace/outbox/"
 
         if machine.provider == "devcontainer":
             from cfleet.devcontainer import WorkerDocker
             docker = WorkerDocker(container_id=machine.container_id, relay_port=worker.relay_port)
-            docker.collect(remote_path, local_dest)
-        elif machine.provider == "external":
-            console.print(
-                f"[yellow]send/collect not supported for external machines.[/yellow]\n"
-                f"[dim]Copy files directly to/from the agent's --cwd on host '{machine.name}'.[/dim]"
-            )
+            docker.collect(effective_remote, local_dest)
+            console.print(f"Collected {effective_remote} from [bold]{name}[/bold] to {local_dest}")
             return
-        else:
-            from cfleet.ssh import rsync_from
-            ssh_user = machine.ssh_user or self.config.resolve_ssh_user(provider=machine.provider)
-            rsync_from(machine.ip, ssh_user, str(self.config.resolve_ssh_key()), remote_path, local_dest)
 
-        console.print(f"Collected {remote_path} from [bold]{name}[/bold] to {local_dest}")
+        from cfleet.ssh import rsync_from
+        host = machine.ssh_host or machine.ip
+        if not host:
+            console.print(f"[red]No SSH host for machine '{machine.name}'.[/red]")
+            return
+        ssh_user = machine.ssh_user or self.config.resolve_ssh_user(provider=machine.provider)
+        rsync_from(host, ssh_user, str(self.config.resolve_ssh_key()), effective_remote, local_dest)
+        console.print(f"Collected {effective_remote} from [bold]{name}[/bold] to {local_dest}")
 
     # ------------------------------------------------------------------
     # logs — via server API
