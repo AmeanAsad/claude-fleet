@@ -29,11 +29,21 @@ class GitHubLevel(str, Enum):
 
 GH_PERMISSION_MAP: dict[GitHubLevel, dict[str, str]] = {
     GitHubLevel.NONE: {},
-    GitHubLevel.READ: {"contents": "read", "metadata": "read"},
-    GitHubLevel.TRIAGE: {"contents": "read", "metadata": "read", "issues": "write"},
+    GitHubLevel.READ: {
+        "contents": "read",
+        "metadata": "read",
+        "packages": "read",
+    },
+    GitHubLevel.TRIAGE: {
+        "contents": "read",
+        "metadata": "read",
+        "packages": "read",
+        "issues": "write",
+    },
     GitHubLevel.WRITE: {
         "contents": "write",
         "metadata": "read",
+        "packages": "read",
         "issues": "write",
         "pull_requests": "write",
     },
