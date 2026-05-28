@@ -2333,6 +2333,42 @@ def attach(
     if api_key:
         env["ANTHROPIC_API_KEY"] = api_key
 
+    # Wire the broker env + git credential helper for `claude`'s subprocesses,
+    # mirroring what `cfleet agent` does at startup. Without this, `git clone`
+    # from the TUI hits the user's gitconfig (often `gh auth git-credential`)
+    # and fails, even though the headless agent's clones would have worked.
+    env["CFLEET_SERVER_URL"] = server_url
+    env["CFLEET_TOKEN"] = token
+    env["CFLEET_WORKER_NAME"] = name
+    import shutil as _shutil_attach
+    gh_helper_attach = _shutil_attach.which("cfleet-gh-token")
+    if gh_helper_attach:
+        existing_count = int(env.get("GIT_CONFIG_COUNT", "0") or 0)
+        env["GIT_CONFIG_COUNT"] = str(existing_count + 3)
+        env[f"GIT_CONFIG_KEY_{existing_count}"] = "credential.https://github.com.helper"
+        env[f"GIT_CONFIG_VALUE_{existing_count}"] = ""
+        env[f"GIT_CONFIG_KEY_{existing_count + 1}"] = "credential.https://github.com.helper"
+        env[f"GIT_CONFIG_VALUE_{existing_count + 1}"] = gh_helper_attach
+        env[f"GIT_CONFIG_KEY_{existing_count + 2}"] = "credential.https://github.com.useHttpPath"
+        env[f"GIT_CONFIG_VALUE_{existing_count + 2}"] = "true"
+
+        # `gh` CLI shim — mint a fresh token per invocation so `gh repo list`,
+        # `gh pr create`, etc. work without `gh auth login`. Lives next to the
+        # workspace dir so it's tidy and gone when the worker is cleaned up.
+        real_gh_attach = _shutil_attach.which("gh")
+        if real_gh_attach:
+            shim_dir = Path(workspace).parent / ".cfleet-bin"
+            shim_dir.mkdir(parents=True, exist_ok=True)
+            shim_path = shim_dir / "gh"
+            shim_path.write_text(
+                "#!/usr/bin/env bash\n"
+                f'exec env GH_TOKEN="$(printf \'host=github.com\\n\\n\' | {gh_helper_attach} get '
+                "| awk -F= '/^password=/{print $2}')\" "
+                f'{real_gh_attach} "$@"\n'
+            )
+            shim_path.chmod(0o755)
+            env["PATH"] = f"{shim_dir}:{env.get('PATH', '')}"
+
     encoded_cwd = workspace.replace("/", "-")
     lock_path = Path.home() / ".claude" / "projects" / encoded_cwd / f"{session_id}.lock"
     if not Path(workspace).exists():
