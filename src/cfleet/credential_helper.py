@@ -22,16 +22,58 @@ CACHE_PATH = Path.home() / ".cfleet-gh-token-cache.json"
 RENEW_BUFFER_SECONDS = 300
 
 
+def _load_config_fallback() -> dict:
+    """Read server URL + token from ~/.cfleet/config.yml when env vars are absent.
+
+    The agent's env wiring (cli.py) usually provides these, but if a subprocess
+    chain loses the env (e.g. an SDK transport resets it), falling back to the
+    on-disk config keeps the helper functional. Cached so repeated calls in one
+    process don't re-read the file.
+    """
+    if not hasattr(_load_config_fallback, "_cache"):
+        cfg = {"server_url": "", "token": ""}
+        config_path = Path.home() / ".cfleet" / "config.yml"
+        if config_path.exists():
+            try:
+                import yaml  # type: ignore
+                data = yaml.safe_load(config_path.read_text()) or {}
+                server = (data.get("server") or {})
+                cfg["server_url"] = str(server.get("url") or "")
+                # Prefer joiner_token (per-worker auth); fall back to operator token.
+                cfg["token"] = str(server.get("joiner_token") or server.get("token") or "")
+            except Exception:
+                pass
+        _load_config_fallback._cache = cfg  # type: ignore[attr-defined]
+    return _load_config_fallback._cache  # type: ignore[attr-defined]
+
+
 def _server_url() -> str:
-    return os.environ.get("CFLEET_SERVER_URL", "")
+    return os.environ.get("CFLEET_SERVER_URL", "") or _load_config_fallback()["server_url"]
 
 
 def _fleet_token() -> str:
-    return os.environ.get("CFLEET_TOKEN", "")
+    return os.environ.get("CFLEET_TOKEN", "") or _load_config_fallback()["token"]
 
 
 def _worker_name() -> str:
-    return os.environ.get("CFLEET_WORKER_NAME", "")
+    """Worker name from env, else inferred from cwd.
+
+    Agent workspaces are always provisioned at $HOME/<worker_name>/, so the
+    leading path component under $HOME is the worker name when the helper is
+    invoked by git inside that tree (the common case).
+    """
+    name = os.environ.get("CFLEET_WORKER_NAME", "")
+    if name:
+        return name
+    try:
+        cwd = Path.cwd().resolve()
+        home = Path.home().resolve()
+        rel = cwd.relative_to(home)
+        if rel.parts:
+            return rel.parts[0]
+    except Exception:
+        pass
+    return ""
 
 
 def _read_cache() -> dict | None:
