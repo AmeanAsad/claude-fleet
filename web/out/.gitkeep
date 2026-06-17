@@ -1,0 +1,4 @@
+This file ensures web/out/ exists in fresh checkouts so pip/uv install
+from git doesn't fail on hatchling force-include. The actual Next.js
+build output (everything else in this dir) is gitignored and produced
+locally via `npm run build` in web/.
