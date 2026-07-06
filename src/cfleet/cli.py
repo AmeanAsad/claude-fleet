@@ -1787,6 +1787,67 @@ def _write_lock(lock_path: str, owner: str) -> None:
     }))
 
 
+def _preempt_tui_if_holding(lock_path: str, timeout_sec: float = 3.0) -> bool:
+    """If the lock is held by a `cfleet attach` TUI, SIGTERM it and wait for release.
+
+    Returns True if we preempted (or the lock was already ours/absent), False if
+    we couldn't take control within the timeout. In practice we always succeed:
+    the TUI's `finally:` clause releases the lock and exits promptly on SIGTERM.
+    """
+    import json
+    import os
+    import signal
+    import time
+    from pathlib import Path
+
+    p = Path(lock_path)
+    if not p.exists():
+        return True
+    try:
+        cur = json.loads(p.read_text())
+    except Exception:
+        p.unlink(missing_ok=True)
+        return True
+
+    if cur.get("owner") != "tui":
+        return True
+
+    tui_pid = cur.get("pid")
+    if not tui_pid:
+        p.unlink(missing_ok=True)
+        return True
+
+    # SIGTERM the TUI. `cfleet attach` catches this via typer's default handler,
+    # which invokes finally: → releases the lock → exits.
+    try:
+        os.kill(int(tui_pid), signal.SIGTERM)
+    except ProcessLookupError:
+        # TUI already gone; lock is stale — clear it.
+        p.unlink(missing_ok=True)
+        return True
+    except Exception:
+        return False
+
+    # Wait for the TUI to clean up.
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if not p.exists():
+            return True
+        try:
+            cur = json.loads(p.read_text())
+            if cur.get("owner") != "tui" or cur.get("pid") != tui_pid:
+                return True
+        except Exception:
+            pass
+        time.sleep(0.1)
+
+    # Timed out — the TUI didn't release cleanly. Clear the lock forcibly so
+    # the agent can make progress. Worst case: the TUI's finally: still runs
+    # later and prints "Lock was held by another process; leaving it."
+    p.unlink(missing_ok=True)
+    return True
+
+
 def _release_lock_if_owner(lock_path: str, expected_owner: str, expected_pid: int, new_owner: str) -> bool:
     """Flip the lock to `new_owner` only if it still matches expected owner+pid.
 
@@ -1950,14 +2011,13 @@ async def _handle_server_command(ws, data: dict, runtime: "_AgentRuntime", worke
 
     if msg_type == "ask":
         prompt = data.get("prompt", "")
-        owner = _read_lock_owner(runtime.lock_path)
-        if owner == "tui":
-            await ws.send(json.dumps({
-                "type": "response",
-                "request_id": request_id,
-                "data": {"error": "TUI is attached; detach to send from dashboard"},
-            }))
-            return
+
+        # Dashboard-wins policy: if a `cfleet attach` TUI is holding the lock,
+        # boot it so the SDK can take the turn without JSONL corruption. The
+        # TUI's `finally:` block releases the lock and prints "Detached".
+        # Session state persists on the JSONL; when the operator re-attaches,
+        # `claude --resume` picks up including this new turn.
+        _preempt_tui_if_holding(runtime.lock_path)
 
         if runtime.status == "working":
             await ws.send(json.dumps({
@@ -2431,7 +2491,9 @@ def attach(
         if _release_lock_if_owner(str(lock_path), "tui", our_pid, "relay"):
             console.print("[dim]Detached. Dashboard control restored.[/dim]")
         else:
-            console.print("[dim yellow]Detached. Lock was held by another process; leaving it.[/dim yellow]")
+            # Common case: a dashboard `ask` preempted us. The lock has already
+            # been rewritten (or cleared) by the agent — don't touch it.
+            console.print("[dim yellow]Detached. Dashboard took over (or another process holds the lock).[/dim yellow]")
 
 
 # --------------------------------------------------------------------------
