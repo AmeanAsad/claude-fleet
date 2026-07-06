@@ -522,6 +522,69 @@ class FleetEngine:
             self.remove_machine(mname)
 
     # ------------------------------------------------------------------
+    # restart (worker)
+    # ------------------------------------------------------------------
+
+    def restart(
+        self,
+        name: str,
+        model: str | None = None,
+    ) -> None:
+        """Restart a worker: kill the process, then respawn on the same machine
+        with the same cwd. The marker file in the worker dir preserves the
+        session_id so the conversation resumes seamlessly.
+
+        Model can be changed on restart — it's a launch flag, not identity.
+        """
+        if name not in self.state.workers:
+            raise KeyError(f"Worker '{name}' not found.")
+
+        worker = self.state.workers[name]
+        machine_name = worker.machine_name
+        cwd = worker.cwd
+        skip_permissions = worker.skip_permissions
+        effective_model = model or worker.model
+
+        machine = self.state.machines.get(machine_name)
+        if not machine:
+            raise ValueError(f"Machine '{machine_name}' not found for worker '{name}'.")
+
+        # Kill the process (but never purge session — the whole point is to keep it)
+        console.print(f"Stopping worker [bold]{name}[/bold]...")
+        if machine.provider == "external":
+            try:
+                self._api_post(f"/api/machines/{machine.name}/kill", {
+                    "worker_name": name,
+                    "purge_session": False,
+                })
+            except Exception as e:
+                console.print(f"[yellow]Warning: kill failed: {e}[/yellow]")
+
+        # Update state to spawning (don't remove the worker record)
+        worker.status = "spawning"
+        if model:
+            worker.model = effective_model
+        self._save_state()
+
+        # Respawn on the same machine
+        console.print(f"Respawning [bold]{name}[/bold] on {machine_name}...")
+        payload: dict = {
+            "worker_name": name,
+            "model": effective_model,
+            "repos": [],
+            "skip_permissions": skip_permissions,
+        }
+        if cwd:
+            payload["cwd"] = cwd
+        result = self._api_post(f"/api/machines/{machine.name}/spawn", payload)
+        if "error" in result:
+            raise RuntimeError(f"Respawn failed: {result['error']}")
+
+        worker.status = "idle"
+        self._save_state()
+        console.print(f"[green]Worker {name} restarted on {machine_name}[/green]")
+
+    # ------------------------------------------------------------------
     # ask — via server API
     # ------------------------------------------------------------------
 

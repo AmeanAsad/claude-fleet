@@ -316,6 +316,17 @@ class MachineAgent:
             env["ANTHROPIC_API_KEY"] = self.api_key or config.anthropic_api_key
             env["CLAUDE_CODE_API_KEY"] = env["ANTHROPIC_API_KEY"]
 
+        # Read the marker file to pick up a persisted session_id so respawns
+        # resume the existing conversation instead of starting fresh.
+        marker_session_id = None
+        marker_path = Path(worker_dir) / ".cfleet-worker"
+        if marker_path.exists():
+            try:
+                marker = json.loads(marker_path.read_text())
+                marker_session_id = marker.get("session_id")
+            except Exception:
+                pass
+
         cfleet_bin = shutil.which("cfleet") or "cfleet"
         cmd = [
             cfleet_bin, "agent", worker_name,
@@ -325,6 +336,8 @@ class MachineAgent:
             "--token", self.token,
             "--skip-permissions" if skip_permissions else "--no-skip-permissions",
         ]
+        if marker_session_id:
+            cmd.extend(["--session-id", marker_session_id])
 
         proc = subprocess.Popen(cmd, env=env)
         self.workers[worker_name] = {"proc": proc, "pid": proc.pid}

@@ -955,6 +955,42 @@ def shell(
 # cfleet send
 # --------------------------------------------------------------------------
 
+def _resolve_worker_ssh(name: str) -> tuple[str, str, str, str]:
+    """Look up a worker's SSH details, preferring the remote server when connected.
+
+    Returns (ssh_host, ssh_user, cwd, ssh_key_path).
+    """
+    from cfleet.config import FleetConfig
+    cfg = FleetConfig.load()
+
+    if _use_remote_server():
+        worker = _api_request("GET", f"/api/workers/{name}")
+        ssh_host = worker.get("ssh_host", "")
+        ssh_user = worker.get("ssh_user", "")
+        cwd = worker.get("cwd", "")
+        if not ssh_host:
+            machine_name = worker.get("machine_name", "")
+            if machine_name:
+                machines = _api_request("GET", "/api/machines")
+                for m in machines:
+                    if m["name"] == machine_name:
+                        ssh_host = m.get("ssh_host", "") or m.get("ip", "")
+                        ssh_user = ssh_user or m.get("ssh_user", "")
+                        break
+        if not ssh_host:
+            console.print(f"[red]No SSH host found for worker '{name}'.[/red]")
+            raise typer.Exit(1)
+        ssh_key = str(cfg.resolve_ssh_key())
+        return ssh_host, ssh_user or "ubuntu", cwd, ssh_key
+
+    engine = _engine()
+    worker = engine.state.get_worker(name)
+    machine = engine._get_machine_for_worker(worker)
+    ssh_host = machine.ssh_host or machine.ip
+    ssh_user = machine.ssh_user or cfg.resolve_ssh_user(provider=machine.provider)
+    return ssh_host, ssh_user, worker.cwd, str(cfg.resolve_ssh_key())
+
+
 @app.command()
 def send(
     name: str = typer.Argument(..., help="Worker name"),
@@ -962,6 +998,13 @@ def send(
     to: Optional[str] = typer.Option(None, "--to", help="Remote destination path (defaults to worker cwd)"),
 ):
     """Send files to a worker via rsync (or `docker cp` for devcontainer)."""
+    if _use_remote_server():
+        ssh_host, ssh_user, cwd, ssh_key = _resolve_worker_ssh(name)
+        dest = to or cwd or "/workspace/inbox/"
+        from cfleet.ssh import rsync_to
+        rsync_to(ssh_host, ssh_user, ssh_key, local_path, dest)
+        console.print(f"Sent {local_path} to [bold]{name}[/bold]:{dest}")
+        return
     engine = _engine()
     engine.send(name, local_path, to)
 
@@ -977,6 +1020,13 @@ def collect(
     path: Optional[str] = typer.Option(None, "--path", help="Remote path to collect (defaults to worker cwd)"),
 ):
     """Collect files from a worker via rsync (or `docker cp` for devcontainer)."""
+    if _use_remote_server():
+        ssh_host, ssh_user, cwd, ssh_key = _resolve_worker_ssh(name)
+        source = path or cwd or "/workspace/outbox/"
+        from cfleet.ssh import rsync_from
+        rsync_from(ssh_host, ssh_user, ssh_key, source, local_dest)
+        console.print(f"Collected {source} from [bold]{name}[/bold] to {local_dest}")
+        return
     engine = _engine()
     engine.collect(name, local_dest, path)
 
@@ -1082,6 +1132,36 @@ def kill(
     else:
         console.print("[red]Provide a worker name or --all[/red]")
         raise typer.Exit(1)
+
+
+# --------------------------------------------------------------------------
+# cfleet restart
+# --------------------------------------------------------------------------
+
+@app.command()
+def restart(
+    name: str = typer.Argument(..., help="Worker name"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Switch model on restart"),
+):
+    """Restart a worker: kill the process, respawn on the same machine.
+
+    The conversation carries over — the worker directory holds a marker file
+    with the session ID, so the new process resumes where the old one left off.
+    Model can be changed on restart (it's a launch flag, not identity).
+    """
+    if _use_remote_server():
+        body: dict = {}
+        if model:
+            body["model"] = model
+        _api_request("POST", f"/api/workers/{name}/restart", body=body)
+        msg = f"Worker {name} restarting"
+        if model:
+            msg += f" with model {model}"
+        console.print(f"[green]{msg}.[/green]")
+        return
+
+    engine = _engine()
+    engine.restart(name, model=model)
 
 
 # --------------------------------------------------------------------------
@@ -1583,6 +1663,7 @@ def agent(
     ssh_host: Optional[str] = typer.Option(None, "--ssh-host", help="Public SSH target (host[:port]) others can reach this machine on"),
     ssh_user: Optional[str] = typer.Option(None, "--ssh-user", help="SSH login user (defaults to $USER)"),
     skip_permissions: bool = typer.Option(True, "--skip-permissions/--no-skip-permissions", help="Run with --dangerously-skip-permissions (default: on)"),
+    session_id_override: Optional[str] = typer.Option(None, "--session-id", help="Resume an existing session (used internally by machine agent on respawn)"),
 ):
     """Start a headless Claude Code worker registered with the fleet.
 
@@ -1702,7 +1783,27 @@ def agent(
         shim_path.chmod(0o755)
         os.environ["PATH"] = f"{shim_dir}:{os.environ.get('PATH', '')}"
 
-    session_id = str(uuid.uuid4())
+    # Marker file: the worker directory IS the identity. If a marker exists,
+    # reuse its session_id so restarts resume the conversation. If not, this
+    # is a fresh spawn — generate a new id and write the marker.
+    # An explicit --session-id flag (from machine agent respawn) takes priority.
+    marker_path = wd_path / ".cfleet-worker"
+    existing_session_id = session_id_override
+    if not existing_session_id and marker_path.exists():
+        try:
+            import json as _mj
+            marker = _mj.loads(marker_path.read_text())
+            existing_session_id = marker.get("session_id")
+        except Exception:
+            pass
+
+    session_id = existing_session_id or str(uuid.uuid4())
+    try:
+        import json as _mj2
+        marker_path.write_text(_mj2.dumps({"name": name, "session_id": session_id}) + "\n")
+    except Exception:
+        pass
+
     encoded_cwd = workspace.replace("/", "-")
     jsonl_path = str(Path.home() / ".claude" / "projects" / encoded_cwd / f"{session_id}.jsonl")
     lock_path = str(Path.home() / ".claude" / "projects" / encoded_cwd / f"{session_id}.lock")
@@ -1755,7 +1856,9 @@ class _AgentRuntime:
         self.skip_permissions = skip_permissions
         self.status: str = "idle"  # idle | working | paused
         self.current_task = None
-        self.has_session = False  # set True once first SDK turn writes the JSONL
+        # If the JSONL already exists (from a prior session/restart), we must
+        # use `resume` on the first SDK turn instead of `extra_args`.
+        self.has_session = Path(jsonl_path).exists()
         # JSONL byte offset already pushed by the SDK streamer. The tailer
         # uses this to avoid re-pushing messages it produced.
         self.sdk_pushed_offset: int = 0

@@ -1049,6 +1049,32 @@ def create_server_app() -> FastAPI:
         )
         return {"task_id": task_id}
 
+    @app.post("/api/workers/{name}/restart")
+    async def restart_worker(name: str, request: Request):
+        """Restart a worker: kill + respawn on the same machine, preserving session."""
+        await _verify_token(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        model = body.get("model") if body else None
+        task_id = uuid.uuid4().hex[:8]
+        _tasks[task_id] = TaskInfo(
+            id=task_id,
+            operation="restart",
+            worker_name=name,
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        asyncio.create_task(
+            _run_background_task(
+                task_id,
+                lambda name=name, model=model:
+                    FleetEngine().restart(name, model=model),
+            )
+        )
+        return {"task_id": task_id}
+
     # ------------------------------------------------------------------
     # Worker commands — routed via WebSocket or SSH fallback
     # ------------------------------------------------------------------
