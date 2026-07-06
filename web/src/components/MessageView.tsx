@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Message, ContentBlock } from "@/lib/types";
-import { renderMarkdown, fmtNum } from "@/lib/format";
+import { renderMarkdown, fmtNum, hangTime } from "@/lib/format";
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -18,7 +18,7 @@ function CopyButton({ text }: { text: string }) {
           /* ignore */
         }
       }}
-      className="absolute top-1.5 right-1.5 text-[10px] px-1.5 py-0.5 rounded border border-border text-text-dim hover:border-border-light hover:text-text bg-surface/90 cursor-pointer transition-colors"
+      className="absolute top-2 right-2 font-mono text-[10px] uppercase tracking-wider px-1.5 py-0.5 text-text-dim hover:text-signal bg-bg cursor-pointer transition-colors"
       type="button"
     >
       {copied ? "copied" : "copy"}
@@ -29,9 +29,11 @@ function CopyButton({ text }: { text: string }) {
 function CodeBlock({ code, lang }: { code: string; lang?: string }) {
   return (
     <div className="relative my-2 group">
-      <pre className="bg-surface-2 border border-border rounded p-3 pr-14 overflow-x-auto font-mono text-[12px] leading-relaxed text-text">
+      <pre className="bg-panel rule-t rule-b rule-l rule-r overflow-x-auto font-mono text-[12px] leading-relaxed text-text pl-3 pr-14 py-2.5"
+        style={{ border: "1px solid var(--color-rule)" }}
+      >
         {lang && (
-          <div className="text-[10px] text-text-dim mb-1.5 uppercase tracking-wider font-sans">{lang}</div>
+          <div className="font-mono text-[10px] text-text-dim mb-1 uppercase tracking-wider">{lang}</div>
         )}
         <code>{code}</code>
       </pre>
@@ -81,9 +83,11 @@ function ToolUseBlock({ block }: { block: ContentBlock }) {
   else if (["Glob", "Grep"].includes(tool)) cmd = input.pattern || "";
 
   return (
-    <div className="flex items-center gap-1.5 my-0.5 pl-2 border-l border-border font-mono text-[11px] text-text-dim overflow-hidden">
-      <span className="shrink-0 text-[10px] uppercase tracking-wide font-sans font-medium">{tool}</span>
-      <span className="truncate">{cmd}</span>
+    <div className="flex items-baseline gap-2 my-1 font-mono text-[12px] text-text-dim min-w-0">
+      <span className="font-mono text-[10px] uppercase tracking-wider text-text-mid shrink-0">
+        {tool}
+      </span>
+      <span className="truncate text-text-mid min-w-0 flex-1">{cmd}</span>
     </div>
   );
 }
@@ -98,18 +102,17 @@ function ToolResultBlock({ block }: { block: ContentBlock }) {
   const truncated = text.length > 800 ? text.slice(0, 800) + "..." : text;
 
   return (
-    <details className={`my-0.5 pl-2 border-l border-border text-[11px] ${isErr ? "text-red" : ""}`}>
-      <summary
-        className={`cursor-pointer font-mono ${isErr ? "text-red" : "text-text-dim"} hover:text-text select-none`}
-      >
-        {isErr ? "error" : "output"} · {fmtNum(len)} chars
+    <details className="my-1 font-mono text-[11px]">
+      <summary className="cursor-pointer text-text-dim hover:text-text select-none">
+        <span className="uppercase tracking-wider">
+          {isErr ? "error" : "output"}
+        </span>
+        <span className="text-rule mx-1.5">·</span>
+        <span className="tabular-nums">{fmtNum(len)} chars</span>
       </summary>
       <pre
-        className={`mt-1 p-2 rounded font-mono text-[11px] leading-snug whitespace-pre-wrap break-all max-h-[200px] overflow-y-auto ${
-          isErr
-            ? "bg-red/5 border border-red/20 text-red"
-            : "bg-surface-2 border border-border text-text-dim"
-        }`}
+        className="mt-1.5 p-2.5 bg-panel font-mono text-[11px] leading-snug whitespace-pre-wrap break-all max-h-[240px] overflow-y-auto text-text-mid"
+        style={{ border: "1px solid var(--color-rule)" }}
       >
         {truncated}
       </pre>
@@ -124,11 +127,13 @@ function ThinkingBlock({ block }: { block: ContentBlock }) {
     thinking.length > 80 ? thinking.slice(0, 80) + "..." : thinking;
 
   return (
-    <details className="my-1 border-l-2 border-border pl-2.5">
-      <summary className="text-[11px] text-text-dim cursor-pointer select-none italic hover:text-text">
-        Thinking: {preview}
+    <details className="my-1">
+      <summary className="font-mono text-[11px] text-text-dim cursor-pointer select-none hover:text-text">
+        <span className="uppercase tracking-wider">thinking</span>
+        <span className="text-rule mx-1.5">·</span>
+        <span className="italic normal-case tracking-normal">{preview}</span>
       </summary>
-      <div className="text-xs text-text-dim italic leading-relaxed whitespace-pre-wrap mt-1 max-h-[300px] overflow-y-auto">
+      <div className="text-[13px] text-text-dim italic leading-relaxed whitespace-pre-wrap mt-2 max-h-[320px] overflow-y-auto pl-3 rule-l">
         {thinking}
       </div>
     </details>
@@ -138,7 +143,7 @@ function ThinkingBlock({ block }: { block: ContentBlock }) {
 function TextBlock({ text }: { text: string }) {
   if (!text.trim()) return null;
   return (
-    <div className="text-sm leading-relaxed whitespace-pre-wrap break-words [&_code]:bg-surface-3 [&_code]:px-1 [&_code]:py-px [&_code]:rounded [&_code]:font-mono [&_code]:text-xs">
+    <div className="font-sans text-[15px] leading-[1.6] whitespace-pre-wrap break-words text-text [&_code]:font-mono [&_code]:text-[13px] [&_code]:bg-panel [&_code]:px-1 [&_code]:py-px">
       {renderRichText(text)}
     </div>
   );
@@ -153,11 +158,25 @@ function ContentBlockView({ block }: { block: ContentBlock }) {
   return null;
 }
 
+/**
+ * A single message in the stream.
+ *
+ * Layout is a two-column grid: a 56px tabular-monospace gutter on the left
+ * for the timestamp (hanging like an ATC log), and the message body on the
+ * right. This is the structural device that makes the stream feel like an
+ * instrumentation readout rather than a chat app. On mobile the gutter
+ * shrinks to 44px and the timestamp becomes optional-hover.
+ *
+ * User vs assistant is differentiated by an eyebrow label and body weight —
+ * not by chat-bubble alignment, which is the template answer. Both stack
+ * left-aligned in one column so long transcripts don't get zig-zag fatigue.
+ */
 function MessageRow({ msg }: { msg: Message }) {
   if (msg.type === "SystemMessage" && msg.subtype === "init") return null;
   if (msg.role === "result" || msg.type === "ResultMessage") return null;
 
   const content = msg.content;
+  const time = hangTime(msg.timestamp);
 
   if (msg.role === "user") {
     const blocks = Array.isArray(content) ? content : [];
@@ -165,12 +184,23 @@ function MessageRow({ msg }: { msg: Message }) {
       .filter((b) => b.type === "TextBlock")
       .map((b) => b.text || "")
       .join("\n");
-    if (!text && typeof content === "string" && !content.trim()) return null;
+    const displayText = typeof content === "string" ? content : text;
+    if (!displayText.trim()) return null;
 
     return (
-      <div className="border-l-2 border-text pl-3.5 my-2 animate-[fadeIn_0.2s_ease]">
-        <div className="text-sm text-text leading-relaxed whitespace-pre-wrap break-words">
-          {typeof content === "string" ? content : text}
+      <div
+        className="grid grid-cols-[44px_1fr] md:grid-cols-[56px_1fr] gap-x-2 md:gap-x-4 py-3 items-start animate-[fadeIn_0.2s_ease] rule-b"
+      >
+        <div className="font-mono text-[11px] text-text-dim tabular-nums pt-1 text-right">
+          {time}
+        </div>
+        <div>
+          <div className="font-mono text-[10px] uppercase tracking-widest text-text-dim mb-1">
+            you
+          </div>
+          <div className="font-sans text-[15px] leading-[1.55] text-text whitespace-pre-wrap break-words">
+            {displayText}
+          </div>
         </div>
       </div>
     );
@@ -180,10 +210,22 @@ function MessageRow({ msg }: { msg: Message }) {
     const blocks = Array.isArray(content) ? content : [];
     if (blocks.length === 0) return null;
     return (
-      <div className="py-1 animate-[fadeIn_0.2s_ease]">
-        {blocks.map((b, i) => (
-          <ContentBlockView key={i} block={b} />
-        ))}
+      <div
+        className="grid grid-cols-[44px_minmax(0,1fr)] md:grid-cols-[56px_minmax(0,1fr)] gap-x-2 md:gap-x-4 py-3 items-start animate-[fadeIn_0.2s_ease] rule-b"
+      >
+        <div className="font-mono text-[11px] text-text-dim tabular-nums pt-1 text-right">
+          {time}
+        </div>
+        <div className="min-w-0">
+          <div className="font-mono text-[10px] uppercase tracking-widest text-signal mb-1">
+            agent
+          </div>
+          <div className="space-y-1 min-w-0">
+            {blocks.map((b, i) => (
+              <ContentBlockView key={i} block={b} />
+            ))}
+          </div>
+        </div>
       </div>
     );
   }
@@ -199,7 +241,14 @@ function MessageRow({ msg }: { msg: Message }) {
             .join("\n");
     if (!text.trim()) return null;
     return (
-      <div className="text-[11px] text-text-dim py-0.5 italic">{text}</div>
+      <div className="grid grid-cols-[44px_1fr] md:grid-cols-[56px_1fr] gap-x-2 md:gap-x-4 py-2 items-baseline">
+        <div className="font-mono text-[11px] text-text-dim tabular-nums text-right">
+          {time}
+        </div>
+        <div className="font-mono text-[11px] text-text-dim italic">
+          {text}
+        </div>
+      </div>
     );
   }
 
@@ -220,28 +269,39 @@ export default function MessageView({ messages, working }: Props) {
 
   if (messages.length === 0 && !working) {
     return (
-      <div className="flex-1 flex items-center justify-center text-text-dim text-sm italic">
-        No messages yet
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-[560px] mx-auto px-4 md:px-6 py-12 md:py-20">
+          <div className="font-eyebrow mb-3">Stream · empty</div>
+          <div className="font-sans text-[16px] text-text mb-2 leading-snug">
+            No messages yet.
+          </div>
+          <div className="font-mono text-[12px] text-text-dim leading-relaxed">
+            Send a prompt to bring the agent online.
+          </div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-1">
-      {messages.map((msg, i) => (
-        <MessageRow key={i} msg={msg} />
-      ))}
-      {working && (
-        <div className="flex items-center gap-2 py-2 text-[12px] text-text-dim animate-[fadeIn_0.2s_ease]">
-          <span className="flex gap-1">
-            <span className="w-1 h-1 rounded-full bg-text-dim animate-[pulse_1.2s_ease-in-out_infinite]" />
-            <span className="w-1 h-1 rounded-full bg-text-dim animate-[pulse_1.2s_ease-in-out_0.2s_infinite]" />
-            <span className="w-1 h-1 rounded-full bg-text-dim animate-[pulse_1.2s_ease-in-out_0.4s_infinite]" />
-          </span>
-          <span className="italic">thinking</span>
-        </div>
-      )}
-      <div ref={bottomRef} />
+    <div className="flex-1 overflow-y-auto">
+      <div className="max-w-[860px] mx-auto px-4 md:px-6">
+        {messages.map((msg, i) => (
+          <MessageRow key={i} msg={msg} />
+        ))}
+        {working && (
+          <div className="grid grid-cols-[44px_1fr] md:grid-cols-[56px_1fr] gap-x-2 md:gap-x-4 py-3 items-baseline animate-[fadeIn_0.2s_ease]">
+            <div className="font-mono text-[11px] text-signal tabular-nums text-right animate-signal">
+              live
+            </div>
+            <div className="font-mono text-[12px] text-text-dim">
+              <span className="text-signal">▪</span>{" "}
+              <span className="italic">agent is working</span>
+            </div>
+          </div>
+        )}
+        <div ref={bottomRef} className="h-4" />
+      </div>
     </div>
   );
 }

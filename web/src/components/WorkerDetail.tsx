@@ -10,6 +10,7 @@ import {
   killWorker,
   createLogStream,
 } from "@/lib/api";
+import { statusGlyph } from "@/lib/format";
 import MessageView from "./MessageView";
 import PromptBar from "./PromptBar";
 
@@ -65,13 +66,22 @@ function mergeUnique(prev: Message[], incoming: Message[]): Message[] {
   return out;
 }
 
+/**
+ * Worker detail — the primary work surface.
+ *
+ * Header: back chevron (mobile only) · status glyph · callsign · machine ·
+ * quiet action row. The header is the one place proportional weight goes;
+ * everything below is monospace metadata + prose messages.
+ *
+ * Info panel is a toggleable strip of key:value pairs, not a modal. Kill and
+ * Interrupt are text buttons that go signal-green on hover — no colored
+ * "Danger" pills, because red destroys the palette.
+ */
 export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
   const [detail, setDetail] = useState<Worker | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [showInfo, setShowInfo] = useState(false);
-  const [toast, setToast] = useState<{ msg: string; error?: boolean } | null>(
-    null,
-  );
+  const [toast, setToast] = useState<{ msg: string; error?: boolean } | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -96,7 +106,6 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
         /* ignore */
       }
     }
-
     load();
 
     const source = createLogStream(
@@ -154,7 +163,6 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
         content: [{ type: "TextBlock", text: prompt }],
       };
       setMessages((prev) => [...prev, optimisticMsg]);
-
       try {
         await sendPrompt(workerName, prompt);
       } catch (e: unknown) {
@@ -174,7 +182,7 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
   }, [workerName]);
 
   const handleKill = useCallback(async () => {
-    if (!confirm(`Destroy worker "${workerName}"?`)) return;
+    if (!confirm(`Destroy worker "${workerName}"? This is not reversible.`)) return;
     try {
       await killWorker(workerName);
       showToast(`Destroying ${workerName}`);
@@ -184,89 +192,110 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
     }
   }, [workerName, onKilled]);
 
-  const status = detail?.status || "...";
-  const statusBg: Record<string, string> = {
-    idle: "bg-green/10 text-green",
-    working: "bg-yellow/10 text-yellow",
-    spawning: "bg-accent-glow text-text-dim",
-    provisioning: "bg-accent-glow text-text-dim",
-    errored: "bg-red/10 text-red",
-  };
+  const glyph = detail ? statusGlyph(detail) : { glyph: "·", animate: false, className: "text-text-dim" };
+  const status = detail?.status || "connecting";
 
   return (
     <section className="flex flex-col flex-1 overflow-hidden bg-bg">
-      {/* Worker bar */}
-      <div className="flex items-center gap-3 px-5 py-3 border-b border-border bg-surface shrink-0 flex-wrap">
-        <button
-          onClick={onBack}
-          className="text-text-dim text-sm md:hidden cursor-pointer hover:text-text"
-        >
-          &larr;
-        </button>
-        <div className="font-serif font-semibold text-[15px] text-text">{workerName}</div>
-        <div
-          className={`text-[10px] px-2 py-0.5 rounded-full font-medium tracking-wide uppercase ${statusBg[status] || "bg-surface-2 text-text-dim"}`}
-        >
-          {status}
+      {/* Callsign bar */}
+      <div className="rule-b bg-bg shrink-0">
+        <div className="flex items-center gap-3 px-4 md:px-5 py-2.5">
+          <button
+            onClick={onBack}
+            className="md:hidden font-mono text-[16px] leading-none text-text-dim hover:text-text cursor-pointer -ml-1 p-1"
+            aria-label="Back to fleet"
+          >
+            ←
+          </button>
+
+          <span
+            className={`
+              font-mono text-[18px] leading-none shrink-0
+              ${glyph.className}
+              ${glyph.animate ? "animate-signal" : ""}
+            `}
+            aria-label={status}
+          >
+            {glyph.glyph}
+          </span>
+
+          <div className="min-w-0 flex-1">
+            <div className="font-callsign text-[16px] md:text-[18px] text-text truncate leading-tight">
+              {workerName}
+            </div>
+            <div className="font-mono text-[11px] text-text-dim truncate leading-tight mt-0.5 uppercase tracking-wider">
+              {detail?.machine_name || "—"}
+              <span className="text-rule mx-1.5">·</span>
+              <span className="text-text-mid">{status}</span>
+              {detail?.model && (
+                <>
+                  <span className="text-rule mx-1.5">·</span>
+                  <span className="normal-case tracking-normal">{detail.model.replace("claude-", "")}</span>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 shrink-0">
+            <button
+              onClick={() => setShowInfo(!showInfo)}
+              className="font-mono text-[11px] uppercase tracking-wider text-text-dim hover:text-text transition-colors cursor-pointer"
+            >
+              info
+            </button>
+            <button
+              onClick={handleInterrupt}
+              className="font-mono text-[11px] uppercase tracking-wider text-text-dim hover:text-signal transition-colors cursor-pointer hidden sm:inline"
+            >
+              stop
+            </button>
+            <button
+              onClick={handleKill}
+              className="font-mono text-[11px] uppercase tracking-wider text-text-dim hover:text-text transition-colors cursor-pointer"
+            >
+              kill
+            </button>
+          </div>
         </div>
-        <div className="flex-1" />
-        <button
-          onClick={() => setShowInfo(!showInfo)}
-          className="text-[11px] px-2.5 py-1 rounded border border-border text-text-dim hover:border-border-light hover:text-text transition-all cursor-pointer"
-        >
-          Info
-        </button>
-        <button
-          onClick={handleInterrupt}
-          className="text-[11px] px-2.5 py-1 rounded border border-border text-text-dim hover:border-yellow hover:text-yellow transition-all cursor-pointer"
-        >
-          Interrupt
-        </button>
-        <button
-          onClick={handleKill}
-          className="text-[11px] px-2.5 py-1 rounded border border-border text-text-dim hover:border-red hover:text-red transition-all cursor-pointer"
-        >
-          Kill
-        </button>
+
+        {/* Info strip — a single monospace row of key:value pairs, no chips. */}
+        {showInfo && detail && (
+          <div className="rule-t bg-panel px-4 md:px-5 py-2 overflow-x-auto">
+            <div className="flex gap-x-5 gap-y-1 flex-wrap font-mono text-[11px]">
+              <InfoField label="host" value={detail.machine_ip || detail.machine_name} />
+              <InfoField label="port" value={String(detail.relay_port)} />
+              <InfoField label="model" value={detail.model?.replace("claude-", "")} />
+              <InfoField label="session" value={detail.session_id?.slice(0, 8)} />
+              <InfoField label="provider" value={detail.provider} />
+              <InfoField
+                label="relay"
+                value={detail.relay_alive === undefined ? undefined : detail.relay_alive ? "alive" : "dead"}
+                muted={detail.relay_alive === false}
+              />
+              <InfoField
+                label="msgs"
+                value={detail.message_count !== undefined ? String(detail.message_count) : undefined}
+              />
+              {detail.total_cost_usd !== undefined && (
+                <InfoField
+                  label="cost"
+                  value={`$${detail.total_cost_usd.toFixed(3)}`}
+                />
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Info row */}
-      {showInfo && detail && (
-        <div className="flex gap-4 flex-wrap px-5 py-2.5 border-b border-border bg-surface-2 text-xs">
-          <InfoChip label="Machine" value={detail.machine_name} />
-          <InfoChip label="Provider" value={detail.provider} />
-          <InfoChip label="IP" value={detail.machine_ip} />
-          <InfoChip label="Port" value={String(detail.relay_port)} />
-          <InfoChip label="Model" value={detail.model} />
-          <InfoChip label="Session" value={detail.session_id?.slice(0, 8)} />
-          <InfoChip
-            label="Relay"
-            value={
-              detail.relay_alive === undefined
-                ? undefined
-                : detail.relay_alive
-                  ? "alive"
-                  : "dead"
-            }
-          />
-        </div>
-      )}
-
-      {/* Messages */}
+      {/* Message stream */}
       <MessageView messages={messages} working={status === "working"} />
 
       {/* Prompt */}
-      <PromptBar onSend={handleSend} />
+      <PromptBar onSend={handleSend} disabled={status === "spawning" || status === "provisioning"} />
 
-      {/* Toast */}
+      {/* Toast — restrained, matches system voice */}
       {toast && (
-        <div
-          className={`fixed bottom-5 left-1/2 -translate-x-1/2 px-4 py-2 rounded text-[13px] z-50 border transition-opacity shadow-sm ${
-            toast.error
-              ? "bg-surface border-red/30 text-red"
-              : "bg-surface border-border text-text"
-          }`}
-        >
+        <div className="fixed bottom-24 md:bottom-20 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-text text-bg font-mono text-[12px] uppercase tracking-wider">
           {toast.msg}
         </div>
       )}
@@ -274,12 +303,13 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
   );
 }
 
-function InfoChip({ label, value }: { label: string; value?: string | null }) {
+function InfoField({ label, value, muted }: { label: string; value?: string | null; muted?: boolean }) {
   if (!value || value === "unknown") return null;
   return (
-    <span className="text-text-dim">
-      <span className="text-text font-medium">{value}</span>{" "}
-      <span className="text-[10px] uppercase tracking-wide">{label}</span>
+    <span className="whitespace-nowrap">
+      <span className="text-text-dim uppercase tracking-wider">{label}</span>
+      <span className="text-rule mx-1.5">/</span>
+      <span className={muted ? "text-text-dim" : "text-text"}>{value}</span>
     </span>
   );
 }

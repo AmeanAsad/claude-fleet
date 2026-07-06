@@ -102,22 +102,26 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
 
   return (
     <div
-      className="fixed inset-0 bg-black/30 backdrop-blur-sm z-50 flex justify-center items-stretch sm:items-center sm:p-5"
+      className="fixed inset-0 z-50 flex justify-center items-stretch sm:items-center sm:p-5"
+      style={{ backgroundColor: "rgba(26, 26, 26, 0.35)" }}
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div
-        className="bg-surface border-border w-full sm:max-w-[440px] flex flex-col animate-[fadeIn_0.2s_ease] shadow-lg
-                   h-[100dvh] sm:h-auto sm:max-h-[calc(100dvh-2.5rem)] sm:border sm:rounded-lg"
+        className="bg-bg w-full sm:max-w-[460px] flex flex-col animate-[fadeIn_0.2s_ease]
+                   h-[100dvh] sm:h-auto sm:max-h-[calc(100dvh-2.5rem)] sm:border sm:border-rule"
       >
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
-          <h2 className="font-serif text-[17px] font-semibold text-text">Spawn Worker</h2>
+        <div className="flex items-center justify-between px-5 py-4 rule-b shrink-0">
+          <div>
+            <div className="font-eyebrow">New worker</div>
+            <div className="font-callsign text-[18px] text-text mt-1 leading-tight">Spawn</div>
+          </div>
           <button
             type="button"
             onClick={onClose}
-            className="text-text-dim hover:text-text text-xl leading-none cursor-pointer sm:hidden"
+            className="font-mono text-[11px] uppercase tracking-wider text-text-dim hover:text-text cursor-pointer"
             aria-label="Close"
           >
-            ×
+            close
           </button>
         </div>
 
@@ -127,7 +131,7 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
           <select
             value={target}
             onChange={(e) => setTarget(e.target.value)}
-            className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded text-[13px] focus:outline-none focus:border-border-light"
+            className="w-full bg-panel text-text px-2.5 py-2 text-[14px] focus:outline-none focus:border-signal font-mono border border-rule"
           >
             {machines.map((m) => (
               <option
@@ -141,7 +145,7 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
             <option value={NEW_VM_VALUE}>+ New cloud VM...</option>
           </select>
           {pickedMachine && (
-            <div className="text-[10px] text-text-dim mt-0.5 italic">
+            <div className="font-mono text-[11px] text-text-dim mt-1.5">
               {pickedMachine.hostname || pickedMachine.ip || ""}
               {pickedMachine.os_info ? ` · ${pickedMachine.os_info}` : ""}
             </div>
@@ -154,7 +158,7 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="my-worker"
-            className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded text-[13px] focus:outline-none focus:border-border-light"
+            className="w-full bg-panel text-text px-2.5 py-2 text-[14px] focus:outline-none focus:border-signal font-mono border border-rule"
             onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
           />
         </Field>
@@ -164,7 +168,7 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
             value={model}
             onChange={(e) => setModel(e.target.value)}
             placeholder={config?.model || "claude-opus-4-6"}
-            className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded text-[13px] focus:outline-none focus:border-border-light"
+            className="w-full bg-panel text-text px-2.5 py-2 text-[14px] focus:outline-none focus:border-signal font-mono border border-rule"
           />
         </Field>
 
@@ -174,7 +178,7 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
               value={cwd}
               onChange={(e) => setCwd(e.target.value)}
               placeholder="~"
-              className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded text-[13px] focus:outline-none focus:border-border-light"
+              className="w-full bg-panel text-text px-2.5 py-2 text-[14px] focus:outline-none focus:border-signal font-mono border border-rule"
             />
           </Field>
         )}
@@ -185,7 +189,7 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
               <select
                 value={provider}
                 onChange={(e) => setProvider(e.target.value)}
-                className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded text-[13px] focus:outline-none focus:border-border-light"
+                className="w-full bg-panel text-text px-2.5 py-2 text-[14px] focus:outline-none focus:border-signal font-mono border border-rule"
               >
                 {config ? (
                   Object.keys(config.providers).map((p) => (
@@ -199,7 +203,7 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
                 )}
               </select>
               {pCfg && (
-                <div className="text-[10px] text-text-dim mt-0.5 italic">
+                <div className="font-mono text-[11px] text-text-dim mt-1.5">
                   {provider === "devcontainer"
                     ? "Local Docker container"
                     : `${provider} (${pCfg.region})`}
@@ -211,7 +215,7 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
               <select
                 value={vmType}
                 onChange={(e) => setVmType(e.target.value)}
-                className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded text-[13px] focus:outline-none focus:border-border-light"
+                className="w-full bg-panel text-text px-2.5 py-2 text-[14px] focus:outline-none focus:border-signal font-mono border border-rule"
               >
                 <option value="">regular</option>
                 <option value="snp">snp (AMD SEV-SNP)</option>
@@ -224,7 +228,7 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
                 value={instanceType}
                 onChange={(e) => setInstanceType(e.target.value)}
                 placeholder={pCfg?.instance_type || "auto"}
-                className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded text-[13px] focus:outline-none focus:border-border-light"
+                className="w-full bg-panel text-text px-2.5 py-2 text-[14px] focus:outline-none focus:border-signal font-mono border border-rule"
               />
             </Field>
 
@@ -233,16 +237,16 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
                 value={region}
                 onChange={(e) => setRegion(e.target.value)}
                 placeholder={pCfg?.region || ""}
-                className="w-full bg-surface-2 border border-border text-text px-2.5 py-2 rounded text-[13px] focus:outline-none focus:border-border-light"
+                className="w-full bg-panel text-text px-2.5 py-2 text-[14px] focus:outline-none focus:border-signal font-mono border border-rule"
               />
             </Field>
 
-            <div className="mt-3 mb-1">
-              <div className="text-[10px] text-text-dim mb-1 uppercase tracking-[0.12em] font-medium">
-                Run this on your machine
+            <div className="mt-5 mb-1">
+              <div className="font-eyebrow mb-1.5">
+                Run this on your laptop
               </div>
               <div className="relative">
-                <pre className="bg-surface-2 border border-border rounded p-2.5 pr-14 text-[12px] font-mono text-text overflow-x-auto whitespace-pre-wrap break-all">
+                <pre className="bg-panel p-3 pr-16 font-mono text-[12px] text-text overflow-x-auto whitespace-pre-wrap break-all border border-rule">
                   {cloudCommand}
                 </pre>
                 <button
@@ -257,37 +261,41 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
                       /* ignore */
                     }
                   }}
-                  className="absolute top-1.5 right-1.5 text-[10px] px-1.5 py-0.5 rounded border border-border text-text-dim hover:border-border-light hover:text-text bg-surface/90 cursor-pointer transition-colors"
+                  className="absolute top-2 right-2 font-mono text-[10px] uppercase tracking-wider px-1.5 py-0.5 text-text-dim hover:text-signal bg-bg cursor-pointer transition-colors"
                 >
                   {copied ? "copied" : "copy"}
                 </button>
               </div>
-              <div className="text-[10px] text-text-dim mt-1 italic">
+              <div className="font-mono text-[11px] text-text-dim mt-2 leading-relaxed">
                 Cloud VMs are provisioned from your laptop (uses your gcloud/az login).
-                After it finishes, the machine self-registers — come back to this dialog
-                and pick it from the Target list.
+                After it finishes, the machine self-registers — come back and pick it
+                from Target.
               </div>
             </div>
           </>
         )}
 
-        {error && <div className="text-red text-xs mt-2">{error}</div>}
+        {error && (
+          <div className="font-mono text-[12px] text-text mt-3 pl-3 rule-l" style={{ borderLeftColor: "var(--color-signal)" }}>
+            {error}
+          </div>
+        )}
 
         </div>
 
-        <div className="flex gap-2 justify-end px-5 py-3 border-t border-border shrink-0 bg-surface">
+        <div className="flex gap-5 justify-end items-center px-5 py-4 rule-t shrink-0 bg-bg">
           <button
             onClick={onClose}
-            className="px-3.5 py-1.5 rounded text-[13px] border border-border text-text-dim hover:border-border-light hover:text-text transition-all cursor-pointer"
+            className="font-mono text-[11px] uppercase tracking-wider text-text-dim hover:text-text cursor-pointer"
           >
-            Cancel
+            cancel
           </button>
           <button
             onClick={handleSubmit}
             disabled={submitting || !usingExisting}
-            className="px-3.5 py-1.5 rounded text-[13px] font-medium bg-accent-bright text-white hover:bg-accent transition-all disabled:opacity-50 cursor-pointer"
+            className="font-mono text-[11px] uppercase tracking-wider px-4 py-2 bg-text text-bg hover:bg-signal transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-text"
           >
-            {submitting ? "Spawning..." : "Spawn"}
+            {submitting ? "spawning···" : "spawn ⏎"}
           </button>
         </div>
       </div>
@@ -303,8 +311,8 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <div className="mb-3">
-      <label className="block text-[10px] text-text-dim mb-1 uppercase tracking-[0.12em] font-medium">
+    <div className="mb-4">
+      <label className="font-eyebrow block mb-1.5">
         {label}
       </label>
       {children}
