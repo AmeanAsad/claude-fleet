@@ -51,13 +51,41 @@ export async function fetchTasks(): Promise<TaskInfo[]> {
   return apiFetch("/tasks");
 }
 
+export interface MessagesPage {
+  messages: Message[];
+  total: number;
+  head: number;
+  has_more: boolean;
+}
+
+/**
+ * Tail-first paginated message fetch.
+ *
+ * - Default: returns the last `limit` messages (newest window).
+ * - Pass `before=<head-of-current-window>` to fetch the previous chunk when
+ *   the user scrolls to the top of the list ("Load older" affordance).
+ *
+ * The response `head` is the index of the first message in the returned
+ * window — use it as the next `before` value to keep paging backward.
+ */
 export async function fetchMessages(
   name: string,
-  limit = 500,
-): Promise<{ messages: Message[]; total: number }> {
-  return apiFetch(
-    `/workers/${encodeURIComponent(name)}/messages?limit=${limit}`,
+  opts: { limit?: number; before?: number } = {},
+): Promise<MessagesPage> {
+  const limit = opts.limit ?? 200;
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (opts.before !== undefined) {
+    params.set("before", String(opts.before));
+  }
+  const res = await apiFetch<Partial<MessagesPage>>(
+    `/workers/${encodeURIComponent(name)}/messages?${params.toString()}`,
   );
+  return {
+    messages: res.messages ?? [],
+    total: res.total ?? 0,
+    head: res.head ?? 0,
+    has_more: res.has_more ?? false,
+  };
 }
 
 export async function sendPrompt(

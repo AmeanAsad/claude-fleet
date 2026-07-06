@@ -2048,17 +2048,31 @@ async def _handle_server_command(ws, data: dict, runtime: "_AgentRuntime", worke
         asyncio.create_task(_notify_done(runtime.current_task))
 
     elif msg_type == "messages":
-        offset = data.get("offset", 0)
-        limit = data.get("limit", 200)
-        messages = _read_session_messages(runtime.jsonl_path, offset, limit)
+        # New: tail-first paginated read. `before` is a message index; when
+        # None the reader returns the last `limit` messages efficiently
+        # (reverse-tail seek). Old callers passing `offset` still work — we
+        # translate them to the equivalent `before`.
+        limit = int(data.get("limit", 200))
+        before = data.get("before")
+        if before is None and "offset" in data and data.get("offset"):
+            # Legacy path: offset+limit meant "chronological forward window".
+            # Preserve behavior by mapping to `before = offset + limit`.
+            before = int(data["offset"]) + limit
+        elif before is not None:
+            before = int(before)
+        result = _read_session_messages(
+            runtime.jsonl_path, before=before, limit=limit,
+        )
         await ws.send(json.dumps({
             "type": "response",
             "request_id": request_id,
-            "data": {"messages": messages, "total": len(messages), "offset": offset},
+            "data": result,
         }))
 
     elif msg_type == "status":
-        all_msgs = _read_session_messages(runtime.jsonl_path, 0, 100000)
+        # Cheap count-only tail read to report message_count without loading
+        # the whole file into memory.
+        tail = _read_session_messages(runtime.jsonl_path, before=None, limit=1)
         await ws.send(json.dumps({
             "type": "response",
             "request_id": request_id,
@@ -2068,7 +2082,7 @@ async def _handle_server_command(ws, data: dict, runtime: "_AgentRuntime", worke
                 "session_id": runtime.session_id,
                 "status": runtime.status,
                 "lock_owner": _read_lock_owner(runtime.lock_path),
-                "message_count": len(all_msgs),
+                "message_count": tail.get("total", 0),
             },
         }))
 
@@ -2225,28 +2239,138 @@ def _jsonl_entry_to_message(entry: dict) -> Optional[dict]:
     }
 
 
-def _read_session_messages(jsonl_path: str, offset: int = 0, limit: int = 200) -> list[dict]:
-    """Read user/assistant messages from a Claude session JSONL file."""
+def _iter_jsonl_lines_reverse(path, chunk_size: int = 65536):
+    """Yield decoded lines from `path` in reverse order without loading the file.
+
+    Reads backwards in `chunk_size`-byte blocks; buffers partial lines across
+    block boundaries. Skips empty lines. Used to fetch the tail of long session
+    JSONL files efficiently (44MB session files would otherwise be fully read
+    on every dashboard refresh).
+    """
+    with open(path, "rb") as f:
+        f.seek(0, 2)  # SEEK_END
+        remaining = f.tell()
+        buffer = b""
+        while remaining > 0:
+            read = min(chunk_size, remaining)
+            remaining -= read
+            f.seek(remaining)
+            chunk = f.read(read)
+            buffer = chunk + buffer
+            # Split — keep the first fragment as partial-line for the next read
+            # (unless we've reached the file's start).
+            lines = buffer.split(b"\n")
+            if remaining > 0:
+                buffer = lines[0]
+                lines = lines[1:]
+            else:
+                buffer = b""
+            # Yield in reverse so most recent line comes first.
+            for line in reversed(lines):
+                if line.strip():
+                    yield line.decode("utf-8", errors="replace")
+
+
+def _read_session_messages(
+    jsonl_path: str,
+    *,
+    before: int | None = None,
+    limit: int = 200,
+) -> dict:
+    """Read messages from a Claude session JSONL, tail-first with pagination.
+
+    Args:
+      before: If None, return the LAST `limit` displayable messages (efficient
+        reverse-tail read). If set, return `messages[before-limit : before]` —
+        the previous chunk older than the current head. `before` is the
+        message-index (not byte-offset).
+      limit: How many messages to return.
+
+    Returns:
+      {
+        "messages":  list of message dicts in chronological order,
+        "total":     total displayable messages in the JSONL,
+        "head":      index of the first message returned (== before-len if
+                     paging older; used by caller as next `before`),
+        "has_more":  True if there are older messages to fetch (head > 0),
+      }
+
+    A "displayable message" is anything _jsonl_entry_to_message returns non-None
+    for — user prompts, assistant messages, system messages we surface. The
+    JSONL contains many entries we filter out (metadata, session-init, etc.),
+    which is why total != file line count.
+    """
     import json
     from pathlib import Path
 
     p = Path(jsonl_path)
     if not p.exists():
-        return []
+        return {"messages": [], "total": 0, "head": 0, "has_more": False}
 
-    messages = []
-    for line in p.read_text().splitlines():
-        if not line.strip():
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        msg = _jsonl_entry_to_message(entry)
-        if msg is not None:
-            messages.append(msg)
+    if before is None:
+        # Tail read: walk backwards, collect the last `limit` displayable
+        # messages. Also count everything we skip so we can report `total`
+        # accurately. This walks the whole file but only parses lines until
+        # we've filled the window — a 44MB file with 20K entries stays under
+        # ~200ms because line-splitting bytes is much cheaper than JSON parsing.
+        collected: list[dict] = []
+        total_before = 0  # messages that come BEFORE the ones we collected
+        filled = False
+        for raw in _iter_jsonl_lines_reverse(p):
+            try:
+                entry = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            msg = _jsonl_entry_to_message(entry)
+            if msg is None:
+                continue
+            if not filled:
+                collected.append(msg)
+                if len(collected) >= limit:
+                    filled = True
+            else:
+                total_before += 1
+        collected.reverse()
+        total = total_before + len(collected)
+        head = total_before
+        return {
+            "messages": collected,
+            "total": total,
+            "head": head,
+            "has_more": head > 0,
+        }
 
-    return messages[offset : offset + limit]
+    # Paginated older read. `before` is a message-index. Return the window
+    # [max(0, before-limit) : before]. Walk forward, count displayable
+    # messages, capture the slice, early-exit past `before`.
+    start = max(0, before - limit)
+    end = before
+    collected = []
+    count = 0
+    with open(p, "rb") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msg = _jsonl_entry_to_message(entry)
+            if msg is None:
+                continue
+            if count >= end:
+                break
+            if count >= start:
+                collected.append(msg)
+            count += 1
+    # Whether there are older messages beyond `start` — only true if start > 0.
+    return {
+        "messages": collected,
+        "total": count if count >= end else count,  # best-effort, may be low
+        "head": start,
+        "has_more": start > 0,
+    }
 
 
 # --------------------------------------------------------------------------

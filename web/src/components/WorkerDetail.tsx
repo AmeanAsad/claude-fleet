@@ -21,11 +21,16 @@ interface Props {
 }
 
 function messageKey(m: Message): string {
+  // Include timestamp for stability — a user could send the same prompt twice
+  // ("ok", "ok"), or the SDK could re-emit a TextBlock the JSONL already has
+  // with slightly different envelope. Timestamp collapses those edge cases.
+  const ts = m.timestamp || "";
   const blocks = Array.isArray(m.content) ? m.content : [];
   let text = "";
   for (const b of blocks) {
     if (b.type === "TextBlock" && b.text) {
-      text = b.text;
+      // Use a snippet + length: full text can be >100KB and blows up the Set.
+      text = `text:${b.text.length}:${b.text.slice(0, 120)}`;
       break;
     }
     if (b.type === "ToolUseBlock" && b.tool_id) {
@@ -41,7 +46,7 @@ function messageKey(m: Message): string {
       break;
     }
   }
-  return `${m.role}|${m.type}|${text}`;
+  return `${ts}|${m.role}|${m.type}|${text}`;
 }
 
 function appendUnique(prev: Message[], msg: Message): Message[] {
@@ -66,6 +71,22 @@ function mergeUnique(prev: Message[], incoming: Message[]): Message[] {
   return out;
 }
 
+/** Prepend an older-history page in front of the existing timeline, deduping
+ *  against what we already have. Used by the "Load older" affordance. */
+function prependUnique(prev: Message[], older: Message[]): Message[] {
+  if (older.length === 0) return prev;
+  const seen = new Set(prev.map(messageKey));
+  const head: Message[] = [];
+  for (const m of older) {
+    const k = messageKey(m);
+    if (!seen.has(k)) {
+      seen.add(k);
+      head.push(m);
+    }
+  }
+  return [...head, ...prev];
+}
+
 /**
  * Worker detail — the primary work surface.
  *
@@ -80,6 +101,10 @@ function mergeUnique(prev: Message[], incoming: Message[]): Message[] {
 export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
   const [detail, setDetail] = useState<Worker | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [head, setHead] = useState<number>(0);
+  const [hasMore, setHasMore] = useState<boolean>(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
   const [toast, setToast] = useState<{ msg: string; error?: boolean } | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -92,18 +117,29 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    // Reset state on worker switch — otherwise stale messages from the previous
+    // worker briefly flash while the new tail loads.
+    setLoading(true);
+    setMessages([]);
+    setHead(0);
+    setHasMore(false);
+    setDetail(null);
 
     async function load() {
       try {
-        const [info, msgData] = await Promise.all([
+        const [info, page] = await Promise.all([
           fetchWorker(workerName),
-          fetchMessages(workerName),
+          fetchMessages(workerName, { limit: 200 }),
         ]);
         if (cancelled) return;
         setDetail(info);
-        setMessages(msgData.messages || []);
+        setMessages(page.messages);
+        setHead(page.head);
+        setHasMore(page.has_more);
       } catch {
         /* ignore */
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     }
     load();
@@ -133,12 +169,16 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
       }
     }, 5000);
 
+    // Message tail poll — safety-net for missed SSE events. Always fetches the
+    // tail (last 200); mergeUnique dedups against what we already have.
     const msgPoll = setInterval(async () => {
       if (cancelled) return;
       try {
-        const data = await fetchMessages(workerName);
+        const page = await fetchMessages(workerName, { limit: 200 });
         if (!cancelled) {
-          setMessages((prev) => mergeUnique(prev, data.messages || []));
+          setMessages((prev) => mergeUnique(prev, page.messages));
+          // Note: don't touch `head` from the tail poll — that only advances
+          // when the user actively pages older, and this could roll it back.
         }
       } catch {
         /* ignore */
@@ -153,6 +193,24 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
       clearInterval(msgPoll);
     };
   }, [workerName]);
+
+  const handleLoadOlder = useCallback(async () => {
+    if (loadingOlder || !hasMore || head <= 0) return;
+    setLoadingOlder(true);
+    try {
+      const page = await fetchMessages(workerName, {
+        limit: 200,
+        before: head,
+      });
+      setMessages((prev) => prependUnique(prev, page.messages));
+      setHead(page.head);
+      setHasMore(page.has_more);
+    } catch (e: unknown) {
+      showToast(`Load older failed: ${e instanceof Error ? e.message : e}`, true);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [workerName, head, hasMore, loadingOlder]);
 
   const handleSend = useCallback(
     async (prompt: string) => {
@@ -288,7 +346,14 @@ export default function WorkerDetail({ workerName, onKilled, onBack }: Props) {
       </div>
 
       {/* Message stream */}
-      <MessageView messages={messages} working={status === "working"} />
+      <MessageView
+        messages={messages}
+        working={status === "working"}
+        loading={loading}
+        hasMore={hasMore}
+        loadingOlder={loadingOlder}
+        onLoadOlder={handleLoadOlder}
+      />
 
       {/* Prompt */}
       <PromptBar onSend={handleSend} disabled={status === "spawning" || status === "provisioning"} />

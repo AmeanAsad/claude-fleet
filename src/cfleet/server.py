@@ -1097,14 +1097,31 @@ def create_server_app() -> FastAPI:
     # ------------------------------------------------------------------
 
     @app.get("/api/workers/{name}/messages")
-    async def get_messages(name: str, request: Request, offset: int = 0, limit: int = 200):
+    async def get_messages(
+        name: str,
+        request: Request,
+        limit: int = 200,
+        before: int | None = None,
+        offset: int = 0,
+    ):
+        """Tail-first paginated fetch.
+
+        - Default (no `before`): returns the last `limit` messages.
+        - With `before=<int>`: returns messages ending at index `before`,
+          i.e. the previous window when the client scrolls up.
+        - Legacy `offset` param kept for back-compat; agent translates it.
+
+        Response shape:
+          { messages: [...], total: N, head: int, has_more: bool }
+        """
         await _verify_token(request)
+        cmd: dict = {"type": "messages", "limit": limit}
+        if before is not None:
+            cmd["before"] = before
+        elif offset:
+            cmd["offset"] = offset
         try:
-            result = await _send_command_to_worker(name, {
-                "type": "messages",
-                "offset": offset,
-                "limit": limit,
-            })
+            result = await _send_command_to_worker(name, cmd)
             return result
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))

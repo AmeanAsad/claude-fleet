@@ -258,14 +258,84 @@ function MessageRow({ msg }: { msg: Message }) {
 interface Props {
   messages: Message[];
   working?: boolean;
+  loading?: boolean;
+  hasMore?: boolean;
+  loadingOlder?: boolean;
+  onLoadOlder?: () => void;
 }
 
-export default function MessageView({ messages, working }: Props) {
+export default function MessageView({
+  messages,
+  working,
+  loading,
+  hasMore,
+  loadingOlder,
+  onLoadOlder,
+}: Props) {
+  const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  // Track the count/last-message-key so we can distinguish "new message
+  // arrived (scroll to bottom)" from "older-history prepended (preserve
+  // viewport position)".
+  const prevCountRef = useRef<number>(0);
+  const prevFirstKeyRef = useRef<string>("");
+  const prevScrollHeightRef = useRef<number>(0);
 
+  const firstKey = messages[0]?.timestamp || `${messages.length}`;
+
+  // Before render, capture scrollHeight so we can restore after a prepend.
+  // useLayoutEffect (via useEffect running before paint via ref pattern) —
+  // React re-runs effects after commit, but we snapshot at each render for
+  // the subsequent compare.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length, working]);
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const prevCount = prevCountRef.current;
+    const prevFirst = prevFirstKeyRef.current;
+    const prevScrollHeight = prevScrollHeightRef.current;
+    prevCountRef.current = messages.length;
+    prevFirstKeyRef.current = firstKey;
+    prevScrollHeightRef.current = el.scrollHeight;
+
+    if (prevCount === 0 && messages.length > 0) {
+      // Initial load — jump straight to bottom without smooth-scroll to
+      // avoid a visible scroll animation on mount.
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    if (messages.length > prevCount && firstKey === prevFirst) {
+      // New message appended (SSE stream or poll). Smooth-scroll to bottom.
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      return;
+    }
+    if (messages.length > prevCount && firstKey !== prevFirst) {
+      // Older history prepended. Preserve the user's reading position by
+      // restoring the previous scroll offset from the new bottom.
+      const delta = el.scrollHeight - prevScrollHeight;
+      el.scrollTop = el.scrollTop + delta;
+      return;
+    }
+    // Working spinner appears/disappears — keep scroll pinned to bottom if
+    // we were already near it.
+    if (working) {
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200;
+      if (nearBottom) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages.length, firstKey, working]);
+
+  if (loading) {
+    return (
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-[560px] mx-auto px-4 md:px-6 py-16 md:py-24">
+          <div className="font-eyebrow mb-3 animate-signal">Loading stream</div>
+          <div className="font-mono text-[12px] text-text-dim leading-relaxed">
+            Fetching the most recent 200 messages from the session.
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (messages.length === 0 && !working) {
     return (
@@ -284,8 +354,23 @@ export default function MessageView({ messages, working }: Props) {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto">
+    <div ref={scrollRef} className="flex-1 overflow-y-auto">
       <div className="max-w-[860px] mx-auto px-4 md:px-6">
+        {/* Older-history affordance — sits at the top of the loaded window.
+            The reader guarantees `hasMore` reflects file-level truth, so this
+            hides itself once we've loaded everything. */}
+        {hasMore && (
+          <div className="py-4 flex justify-center rule-b">
+            <button
+              onClick={onLoadOlder}
+              disabled={loadingOlder}
+              className="font-mono text-[11px] uppercase tracking-wider text-text-dim hover:text-signal transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {loadingOlder ? "loading···" : "↑ load older"}
+            </button>
+          </div>
+        )}
+
         {messages.map((msg, i) => (
           <MessageRow key={i} msg={msg} />
         ))}
