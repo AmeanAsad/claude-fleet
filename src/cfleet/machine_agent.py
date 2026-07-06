@@ -261,8 +261,20 @@ class MachineAgent:
                     )
 
             env = os.environ.copy()
-            env["ANTHROPIC_API_KEY"] = self.api_key or config.anthropic_api_key
-            env["CLAUDE_CODE_API_KEY"] = env["ANTHROPIC_API_KEY"]
+            # Auth mode: `cfleet auth oauth` on this host writes ~/.cfleet/auth-mode
+            # to 'oauth' — in that mode we deliberately DO NOT inject the API key
+            # so `claude` falls through to ~/.claude/.credentials.json and uses
+            # the operator's subscription instead of billing the API.
+            try:
+                auth_mode = (Path.home() / ".cfleet" / "auth-mode").read_text().strip()
+            except FileNotFoundError:
+                auth_mode = ""
+            if auth_mode == "oauth":
+                env.pop("ANTHROPIC_API_KEY", None)
+                env.pop("CLAUDE_CODE_API_KEY", None)
+            else:
+                env["ANTHROPIC_API_KEY"] = self.api_key or config.anthropic_api_key
+                env["CLAUDE_CODE_API_KEY"] = env["ANTHROPIC_API_KEY"]
 
             # Resolve the cfleet binary. machine_agent itself runs from a cfleet
             # install, so cfleet is on PATH (or alongside this interpreter).

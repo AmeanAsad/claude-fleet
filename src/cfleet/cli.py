@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -25,6 +26,9 @@ app.add_typer(operator_app, name="operator")
 
 secret_app = typer.Typer(help="Server-side canonical secrets (Anthropic key, default model).")
 app.add_typer(secret_app, name="secret")
+
+auth_app = typer.Typer(help="Toggle this host between Anthropic API-key and Claude account (OAuth) auth for workers.")
+app.add_typer(auth_app, name="auth")
 
 console = Console()
 
@@ -1638,12 +1642,22 @@ def agent(
             import shutil as _sh
             _sh.copy(claude_md_src, claude_md_dst)
 
-    # Pull the canonical Anthropic key from the server on every spawn so a
-    # rotation via `cfleet secret set anthropic` takes effect without a
-    # config sync. Falls back to cached config on network errors.
-    api_key = _resolve_anthropic_key_fresh(cfg)
-    if api_key:
-        os.environ["ANTHROPIC_API_KEY"] = api_key
+    # Respect host auth mode: in 'oauth' mode we skip the API-key injection so
+    # `claude` falls through to ~/.claude/.credentials.json (subscription auth).
+    try:
+        _auth_mode = (Path.home() / ".cfleet" / "auth-mode").read_text().strip()
+    except FileNotFoundError:
+        _auth_mode = ""
+    if _auth_mode == "oauth":
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        os.environ.pop("CLAUDE_CODE_API_KEY", None)
+    else:
+        # Pull the canonical Anthropic key from the server on every spawn so a
+        # rotation via `cfleet secret set anthropic` takes effect without a
+        # config sync. Falls back to cached config on network errors.
+        api_key = _resolve_anthropic_key_fresh(cfg)
+        if api_key:
+            os.environ["ANTHROPIC_API_KEY"] = api_key
 
     # Surface fleet identity to child processes (git's credential.helper, etc.)
     os.environ["CFLEET_SERVER_URL"] = effective_server_url
@@ -2328,10 +2342,18 @@ def attach(
 
     # Local exec path
     model = worker.get("model") or cfg.resolve_model() or "claude-opus-4-6"
-    api_key = _resolve_anthropic_key_fresh(cfg)
     env = os.environ.copy()
-    if api_key:
-        env["ANTHROPIC_API_KEY"] = api_key
+    try:
+        _auth_mode = (Path.home() / ".cfleet" / "auth-mode").read_text().strip()
+    except FileNotFoundError:
+        _auth_mode = ""
+    if _auth_mode == "oauth":
+        env.pop("ANTHROPIC_API_KEY", None)
+        env.pop("CLAUDE_CODE_API_KEY", None)
+    else:
+        api_key = _resolve_anthropic_key_fresh(cfg)
+        if api_key:
+            env["ANTHROPIC_API_KEY"] = api_key
 
     # Wire the broker env + git credential helper for `claude`'s subprocesses,
     # mirroring what `cfleet agent` does at startup. Without this, `git clone`
@@ -2639,3 +2661,128 @@ def gh_log(
         table.add_row(ts, e.worker_name, f"[{color}]{e.level}[/{color}]", repos, exp)
 
     console.print(table)
+
+
+# --------------------------------------------------------------------------
+# cfleet auth — toggle host between Anthropic API-key and Claude account auth
+# --------------------------------------------------------------------------
+
+_AUTH_MODE_PATH = Path.home() / ".cfleet" / "auth-mode"
+_API_KEY_FILE = Path.home() / ".claude" / ".api-key"
+_CLAUDE_CREDS = Path.home() / ".claude" / ".credentials.json"
+_BASHRC_MARKER_BEGIN = "# >>> cfleet auth (managed) >>>"
+_BASHRC_MARKER_END = "# <<< cfleet auth (managed) <<<"
+
+
+def _read_auth_mode() -> str:
+    """Returns 'api', 'oauth', or '' (unset). Machine-agent reads this too."""
+    try:
+        return _AUTH_MODE_PATH.read_text().strip()
+    except FileNotFoundError:
+        return ""
+
+
+def _write_auth_mode(mode: str) -> None:
+    _AUTH_MODE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _AUTH_MODE_PATH.write_text(mode + "\n")
+
+
+def _replace_bashrc_block(new_block: str) -> None:
+    """Idempotently write a managed cfleet-auth block into ~/.bashrc.
+
+    Removes any prior block, appends the new one. Empty new_block just removes
+    the prior block (used by `cfleet auth oauth`).
+    """
+    bashrc = Path.home() / ".bashrc"
+    existing = ""
+    if bashrc.exists():
+        existing = bashrc.read_text()
+
+    lines = existing.splitlines()
+    kept: list[str] = []
+    inside = False
+    for line in lines:
+        if line.strip() == _BASHRC_MARKER_BEGIN:
+            inside = True
+            continue
+        if line.strip() == _BASHRC_MARKER_END:
+            inside = False
+            continue
+        if not inside:
+            kept.append(line)
+
+    out = "\n".join(kept).rstrip() + "\n"
+    if new_block:
+        out += f"\n{_BASHRC_MARKER_BEGIN}\n{new_block.rstrip()}\n{_BASHRC_MARKER_END}\n"
+
+    bashrc.write_text(out)
+
+
+@auth_app.command("api")
+def auth_api():
+    """Switch this host to Anthropic API-key auth for both shell and workers."""
+    from cfleet.config import FleetConfig
+
+    try:
+        cfg = FleetConfig.load()
+    except FileNotFoundError:
+        console.print("[red]Run 'cfleet init' or 'cfleet join' first.[/red]")
+        raise typer.Exit(1)
+
+    key = _resolve_anthropic_key_fresh(cfg)
+    if not key:
+        console.print("[red]No Anthropic API key available (server has none, and no local cache).[/red]")
+        console.print("[dim]Set one with: cfleet secret set anthropic sk-ant-...[/dim]")
+        raise typer.Exit(1)
+
+    _API_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _API_KEY_FILE.write_text(key)
+    _API_KEY_FILE.chmod(0o600)
+
+    _replace_bashrc_block(
+        f'export ANTHROPIC_API_KEY="$(cat {_API_KEY_FILE})"\n'
+        f'export CLAUDE_CODE_API_KEY="$ANTHROPIC_API_KEY"'
+    )
+    _write_auth_mode("api")
+
+    console.print(f"[green]Auth mode: api[/green]")
+    console.print(f"  Wrote key to {_API_KEY_FILE}")
+    console.print(f"  Bashrc export block updated (`source ~/.bashrc` in existing shells).")
+    console.print(f"  Newly spawned workers on this host will use ANTHROPIC_API_KEY.")
+
+
+@auth_app.command("oauth")
+def auth_oauth():
+    """Switch this host to Claude account (OAuth) auth for both shell and workers.
+
+    Removes the API key from shell env + machine-agent injection. `claude` will
+    fall through to ~/.claude/.credentials.json — run `claude` interactively once
+    to complete the OAuth flow if you haven't already.
+    """
+    _API_KEY_FILE.unlink(missing_ok=True)
+    _replace_bashrc_block("")
+    _write_auth_mode("oauth")
+
+    console.print(f"[green]Auth mode: oauth[/green]")
+    console.print(f"  Removed {_API_KEY_FILE}")
+    console.print(f"  Cleared managed bashrc export block (`source ~/.bashrc` in existing shells).")
+    if _CLAUDE_CREDS.exists():
+        console.print(f"  Existing OAuth credentials found at {_CLAUDE_CREDS} — you're set.")
+    else:
+        console.print(f"[yellow]  No OAuth credentials yet at {_CLAUDE_CREDS}.[/yellow]")
+        console.print(f"[yellow]  Run `claude` interactively once to complete login.[/yellow]")
+    console.print(f"  Newly spawned workers on this host will inherit whatever `claude` finds — env is scrubbed.")
+
+
+@auth_app.command("status")
+def auth_status():
+    """Show current auth mode + presence of API key / OAuth credentials."""
+    mode = _read_auth_mode() or "(unset — defaults to api if ANTHROPIC_API_KEY is set)"
+    api_key_present = _API_KEY_FILE.exists()
+    oauth_present = _CLAUDE_CREDS.exists()
+    env_key_set = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+    console.print(f"[bold]Auth mode:[/bold] {mode}")
+    console.print(f"  ~/.claude/.api-key          {'✓ present' if api_key_present else '✗ absent'}")
+    console.print(f"  ~/.claude/.credentials.json {'✓ present' if oauth_present else '✗ absent'}")
+    console.print(f"  ANTHROPIC_API_KEY in env    {'✓ set (this shell)' if env_key_set else '✗ unset (this shell)'}")
