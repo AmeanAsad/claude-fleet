@@ -856,18 +856,30 @@ def create_server_app() -> FastAPI:
         return result
 
     @app.get("/api/machines/{name}/workers")
-    async def list_machine_workers(name: str, request: Request):
-        """Return the names of workers registered for this machine.
+    async def list_machine_workers(name: str, request: Request, detail: bool = False):
+        """Return workers registered for this machine.
 
-        Used by the machine-agent on (re)connect to adopt workers it didn't spawn
-        itself (e.g. someone ran `cfleet agent` directly on the host), so kill
-        commands work uniformly regardless of how the worker was started.
+        Default response is a list of names (back-compat). Pass ?detail=true to
+        get full worker records — the machine-agent uses these to respawn
+        workers after a host reboot (needs cwd/model/skip_permissions/repos).
         """
         await _verify_token(request)
         state = FleetState.load()
         if name not in state.machines:
             raise HTTPException(status_code=404, detail=f"Machine '{name}' not found")
-        return [w.name for w in state.workers.values() if w.machine_name == name]
+        workers = [w for w in state.workers.values() if w.machine_name == name]
+        if not detail:
+            return [w.name for w in workers]
+        return [
+            {
+                "name": w.name,
+                "cwd": w.cwd,
+                "model": w.model,
+                "repos": w.repos,
+                "skip_permissions": w.skip_permissions,
+            }
+            for w in workers
+        ]
 
     @app.post("/api/machines/{name}/spawn")
     async def spawn_on_machine(name: str, request: Request):

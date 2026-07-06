@@ -41,6 +41,11 @@ class MachineAgent:
         self.workers: dict[str, dict] = {}
         self._next_port = 8421
         self._shutdown = False
+        # Respawn attempt tracking so a broken worker doesn't loop forever.
+        # worker_name -> [(timestamp, ...)] most-recent-first, purged as they age out.
+        self._respawn_attempts: dict[str, list[float]] = {}
+        self._respawn_window_sec = 60.0
+        self._respawn_max_attempts = 3
 
     def _ws_url(self) -> str:
         return (
@@ -168,40 +173,78 @@ class MachineAgent:
         except (FileNotFoundError, ValueError):
             return None
 
-    def _server_worker_names(self) -> list[str]:
-        """Ask the server which workers are registered for this machine."""
+    def _server_worker_records(self) -> list[dict]:
+        """Ask the server for full worker records registered on this machine.
+
+        Returns [] on any error. Used by reconcile for both adoption AND
+        auto-respawn after a host reboot — the server holds the definitive
+        cwd/model/skip_permissions for each worker.
+        """
         import urllib.request, urllib.error
         try:
             req = urllib.request.Request(
-                f"{self.server_url}/api/machines/{self.machine_name}/workers",
+                f"{self.server_url}/api/machines/{self.machine_name}/workers?detail=true",
                 headers={"Authorization": f"Bearer {self.token}"},
             )
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read())
             if isinstance(data, list):
-                return [str(n) for n in data]
+                return [d for d in data if isinstance(d, dict) and d.get("name")]
         except Exception:
             pass
         return []
 
+    def _should_attempt_respawn(self, name: str) -> bool:
+        """Rate-limit respawns: at most self._respawn_max_attempts in the last window."""
+        import time
+        now = time.monotonic()
+        history = [t for t in self._respawn_attempts.get(name, []) if now - t < self._respawn_window_sec]
+        self._respawn_attempts[name] = history
+        return len(history) < self._respawn_max_attempts
+
+    def _record_respawn_attempt(self, name: str) -> None:
+        import time
+        self._respawn_attempts.setdefault(name, []).append(time.monotonic())
+
     def _reconcile_workers(self) -> None:
         """Sync self.workers with the server's view + actual processes on this host.
 
-        - Adopt server-known workers whose process is running but we don't track.
         - Drop entries whose PID is dead.
+        - Adopt server-known workers whose process is running but we don't track.
+        - Respawn server-known workers with no live process (host reboot recovery),
+          rate-limited to avoid loops on broken workers.
         """
         # Drop dead entries
         for name in list(self.workers.keys()):
             if not self._is_alive(self.workers[name]):
                 del self.workers[name]
 
-        # Adopt new ones
-        for name in self._server_worker_names():
+        records = self._server_worker_records()
+        for rec in records:
+            name = rec["name"]
             if name in self.workers:
                 continue
             pid = self._find_pid_by_worker_name(name)
             if pid:
+                # Already running (started manually via `cfleet agent`) — adopt it.
                 self.workers[name] = {"proc": None, "pid": pid}
+                continue
+            # No live process — this is a reboot-recovery or crash situation.
+            # Server still thinks the worker exists, but the process is gone.
+            if not self._should_attempt_respawn(name):
+                continue
+            self._record_respawn_attempt(name)
+            try:
+                print(f"[machine] Respawning {name} (server-registered, no live process)")
+                self._launch_worker(
+                    worker_name=name,
+                    model=rec.get("model", ""),
+                    repos=rec.get("repos", []) or [],
+                    cwd=rec.get("cwd", ""),
+                    skip_permissions=bool(rec.get("skip_permissions", True)),
+                )
+            except Exception as e:
+                print(f"[machine] Respawn of {name} failed: {e}")
 
     async def _handle_message(self, ws, data: dict) -> None:
         msg_type = data.get("type")
@@ -216,6 +259,75 @@ class MachineAgent:
             await self._handle_kill(ws, data, request_id)
         elif msg_type == "ping":
             await ws.send(json.dumps({"type": "pong", "request_id": request_id}))
+
+    def _launch_worker(
+        self,
+        worker_name: str,
+        model: str,
+        repos: list,
+        cwd: str,
+        skip_permissions: bool,
+    ) -> None:
+        """Common worker-launch logic — used by both operator-initiated spawn and
+        reconcile-respawn after a host reboot.
+
+        Raises on failure; caller handles the exception (WS response or log).
+        Records the resulting process in self.workers.
+        """
+        from cfleet.config import FleetConfig
+
+        try:
+            config = FleetConfig.load()
+        except FileNotFoundError:
+            config = FleetConfig()
+
+        # Cwd default + scaffolding (inbox/outbox/repos/CLAUDE.md) live in
+        # `cfleet agent` itself so manual launches behave the same.
+        worker_dir = cwd or os.path.join(os.path.expanduser("~"), worker_name)
+        os.makedirs(worker_dir, exist_ok=True)
+
+        if repos:
+            # Honor --repo: clone into worker_dir/repos/ before agent boot.
+            for r in repos:
+                dest = Path(worker_dir) / "repos" / r["name"]
+                if dest.exists():
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                branch = r.get("branch", "main")
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", "--single-branch",
+                     "-b", branch, r["url"], str(dest)],
+                    check=False,
+                )
+
+        env = os.environ.copy()
+        # Auth mode: `cfleet auth oauth` on this host writes ~/.cfleet/auth-mode
+        # to 'oauth' — in that mode we deliberately DO NOT inject the API key
+        # so `claude` falls through to ~/.claude/.credentials.json and uses
+        # the operator's subscription instead of billing the API.
+        try:
+            auth_mode = (Path.home() / ".cfleet" / "auth-mode").read_text().strip()
+        except FileNotFoundError:
+            auth_mode = ""
+        if auth_mode == "oauth":
+            env.pop("ANTHROPIC_API_KEY", None)
+            env.pop("CLAUDE_CODE_API_KEY", None)
+        else:
+            env["ANTHROPIC_API_KEY"] = self.api_key or config.anthropic_api_key
+            env["CLAUDE_CODE_API_KEY"] = env["ANTHROPIC_API_KEY"]
+
+        cfleet_bin = shutil.which("cfleet") or "cfleet"
+        cmd = [
+            cfleet_bin, "agent", worker_name,
+            "--cwd", worker_dir,
+            "--model", model or self.model,
+            "--server-url", self.server_url,
+            "--token", self.token,
+            "--skip-permissions" if skip_permissions else "--no-skip-permissions",
+        ]
+
+        proc = subprocess.Popen(cmd, env=env)
+        self.workers[worker_name] = {"proc": proc, "pid": proc.pid}
 
     async def _handle_spawn(self, ws, data: dict, request_id: str) -> None:
         worker_name = data.get("worker_name", "")
@@ -234,62 +346,7 @@ class MachineAgent:
             return
 
         try:
-            from cfleet.config import FleetConfig
-
-            try:
-                config = FleetConfig.load()
-            except FileNotFoundError:
-                config = FleetConfig()
-
-            # Cwd default + scaffolding (inbox/outbox/repos/CLAUDE.md) live in
-            # `cfleet agent` itself so manual launches behave the same.
-            worker_dir = cwd or os.path.join(os.path.expanduser("~"), worker_name)
-            os.makedirs(worker_dir, exist_ok=True)
-
-            if repos:
-                # Honor --repo: clone into worker_dir/repos/ before agent boot.
-                for r in repos:
-                    dest = Path(worker_dir) / "repos" / r["name"]
-                    if dest.exists():
-                        continue
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    branch = r.get("branch", "main")
-                    subprocess.run(
-                        ["git", "clone", "--depth", "1", "--single-branch",
-                         "-b", branch, r["url"], str(dest)],
-                        check=False,
-                    )
-
-            env = os.environ.copy()
-            # Auth mode: `cfleet auth oauth` on this host writes ~/.cfleet/auth-mode
-            # to 'oauth' — in that mode we deliberately DO NOT inject the API key
-            # so `claude` falls through to ~/.claude/.credentials.json and uses
-            # the operator's subscription instead of billing the API.
-            try:
-                auth_mode = (Path.home() / ".cfleet" / "auth-mode").read_text().strip()
-            except FileNotFoundError:
-                auth_mode = ""
-            if auth_mode == "oauth":
-                env.pop("ANTHROPIC_API_KEY", None)
-                env.pop("CLAUDE_CODE_API_KEY", None)
-            else:
-                env["ANTHROPIC_API_KEY"] = self.api_key or config.anthropic_api_key
-                env["CLAUDE_CODE_API_KEY"] = env["ANTHROPIC_API_KEY"]
-
-            # Resolve the cfleet binary. machine_agent itself runs from a cfleet
-            # install, so cfleet is on PATH (or alongside this interpreter).
-            cfleet_bin = shutil.which("cfleet") or "cfleet"
-            cmd = [
-                cfleet_bin, "agent", worker_name,
-                "--cwd", worker_dir,
-                "--model", model,
-                "--server-url", self.server_url,
-                "--token", self.token,
-                "--skip-permissions" if skip_permissions else "--no-skip-permissions",
-            ]
-
-            proc = subprocess.Popen(cmd, env=env)
-            self.workers[worker_name] = {"proc": proc, "pid": proc.pid}
+            self._launch_worker(worker_name, model, repos, cwd, skip_permissions)
 
             await ws.send(json.dumps({
                 "type": "response",
