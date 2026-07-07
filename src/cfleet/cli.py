@@ -1150,11 +1150,38 @@ def restart(
     Model can be changed on restart (it's a launch flag, not identity).
     """
     if _use_remote_server():
-        body: dict = {}
-        if model:
-            body["model"] = model
-        _api_request("POST", f"/api/workers/{name}/restart", body=body)
-        msg = f"Worker {name} restarting"
+        # Fetch worker details to get machine_name, cwd, model, skip_permissions
+        worker = _api_request("GET", f"/api/workers/{name}")
+        machine_name = worker.get("machine_name", "")
+        cwd = worker.get("cwd", "")
+        effective_model = model or worker.get("model", "")
+        skip_perms = worker.get("skip_permissions", True)
+
+        if not machine_name:
+            console.print(f"[red]Worker '{name}' has no machine.[/red]")
+            raise typer.Exit(1)
+
+        # Kill (preserve session)
+        console.print(f"Stopping [bold]{name}[/bold]...")
+        _api_request("DELETE", f"/api/workers/{name}")
+
+        import time
+        time.sleep(1)
+
+        # Respawn on the same machine with the same cwd
+        console.print(f"Respawning [bold]{name}[/bold] on {machine_name}...")
+        result = _api_request("POST", f"/api/machines/{machine_name}/spawn", body={
+            "worker_name": name,
+            "model": effective_model,
+            "cwd": cwd,
+            "repos": [],
+            "skip_permissions": skip_perms,
+        })
+        if result.get("error"):
+            console.print(f"[red]Respawn failed: {result['error']}[/red]")
+            raise typer.Exit(1)
+
+        msg = f"Worker {name} restarted"
         if model:
             msg += f" with model {model}"
         console.print(f"[green]{msg}.[/green]")
