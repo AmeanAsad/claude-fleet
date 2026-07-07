@@ -1,0 +1,152 @@
+@import "tailwindcss";
+
+@theme inline {
+  /* Palette — three greys, one accent. Restraint is the point. */
+  --color-bg: #FAF9F6;
+  --color-panel: #F4F3EF;
+  --color-rule: #E4E2DB;
+  --color-text: #1A1A1A;
+  --color-text-dim: #6B6B6B;
+  --color-text-mid: #4A4A4A;
+  --color-signal: #1F5A2E;
+  --color-signal-soft: rgba(31, 90, 46, 0.08);
+
+  /* Legacy names kept so components compile until they're updated. */
+  --color-surface: #FAF9F6;
+  --color-surface-2: #F4F3EF;
+  --color-surface-3: #ECEAE4;
+  --color-border: #E4E2DB;
+  --color-border-light: #D0CEC6;
+  --color-accent: #1A1A1A;
+  --color-accent-dim: #4A4A4A;
+  --color-accent-bright: #1F5A2E;
+  --color-accent-glow: rgba(31, 90, 46, 0.05);
+  --color-accent-glow-strong: rgba(31, 90, 46, 0.10);
+  --color-green: #1F5A2E;
+  --color-yellow: #7A5B00;
+  --color-red: #8B2020;
+  --color-cyan: #4A4A4A;
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-serif: var(--font-mono); /* headings use mono, not serif */
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  height: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  height: 100dvh;
+  overflow: hidden;
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Callsigns and structural type are monospace. IBM Plex Mono set on <html>
+   via next/font in layout.tsx (--font-mono). */
+.font-callsign {
+  font-family: var(--font-mono), ui-monospace, "SF Mono", monospace;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.font-eyebrow {
+  font-family: var(--font-mono), ui-monospace, "SF Mono", monospace;
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--color-text-dim);
+}
+
+.font-meta {
+  font-family: var(--font-mono), ui-monospace, "SF Mono", monospace;
+  font-size: 12px;
+  color: var(--color-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Hairline rule — the one and only divider treatment. */
+.rule-t { border-top: 1px solid var(--color-rule); }
+.rule-b { border-bottom: 1px solid var(--color-rule); }
+.rule-r { border-right: 1px solid var(--color-rule); }
+.rule-l { border-left: 1px solid var(--color-rule); }
+
+/* Scrollbar — invisible on mobile, present-but-quiet on desktop.
+   The chrome should never draw attention to itself. */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 0;
+}
+*:hover::-webkit-scrollbar-thumb {
+  background: var(--color-rule);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-light);
+}
+
+/* Status glyph pulse — the ONE animation. Nothing else moves ambiently. */
+@keyframes signal-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+
+.animate-signal {
+  animation: signal-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-signal { animation: none; }
+  * { transition: none !important; }
+}
+
+/* Focus states — visible, monochrome, no glow. Keyboard navigation is
+   first-class here because half our users live in a terminal. */
+:focus-visible {
+  outline: 2px solid var(--color-signal);
+  outline-offset: 2px;
+  border-radius: 0;
+}
+
+button:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Prevent iOS from zooming when tapping into inputs. 16px is the threshold. */
+input, textarea, select {
+  font-size: 16px;
+}
+@media (min-width: 768px) {
+  input, textarea, select {
+    font-size: 15px;
+  }
+}
+
+/* Selection — signal-tinted, not browser default blue. */
+::selection {
+  background: var(--color-signal-soft);
+  color: var(--color-signal);
+}

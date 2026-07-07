@@ -22,6 +22,7 @@ Thumbs.db
 # Secrets — NEVER commit these
 fleet.yml
 secrets.env
+secrets/
 *.pem
 *.key
 
@@ -45,3 +46,4 @@ plans/
 
 # Unrelated local directories
 scripties/
+tmp-test/

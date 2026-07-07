@@ -1,4 +1,4 @@
-"""Pulumi program for Claude Fleet worker VMs.
+"""Pulumi program for Claude Fleet machine VMs.
 
 Reads a 'provider' config key and delegates to the appropriate provider-specific
 resource creation. Supports Azure and GCP.
@@ -19,7 +19,7 @@ def _read_ssh_pub_key(ssh_key_path: str) -> str:
         return "ssh-ed25519 PLACEHOLDER"
 
 
-def _create_azure_resources(workers: dict, azure_cfg: dict) -> None:
+def _create_azure_resources(machines: dict, azure_cfg: dict) -> None:
     import pulumi_azure_native as azure
 
     region = azure_cfg["region"]
@@ -47,8 +47,8 @@ def _create_azure_resources(workers: dict, azure_cfg: dict) -> None:
 
     # Per-region networking (vnet, subnet, NSG)
     needed_regions = {region}
-    for worker_cfg in workers.values():
-        needed_regions.add(worker_cfg.get("region", region))
+    for machine_cfg in machines.values():
+        needed_regions.add(machine_cfg.get("region", region))
 
     region_nets: dict[str, tuple] = {}
     for idx, loc in enumerate(sorted(needed_regions)):
@@ -104,17 +104,17 @@ def _create_azure_resources(workers: dict, azure_cfg: dict) -> None:
 
         region_nets[loc] = (subnet, nsg)
 
-    for name, worker_cfg in workers.items():
-        instance_type = worker_cfg.get("instance_type", default_instance_type)
-        vm_type = worker_cfg.get("vm_type", "regular")
-        worker_location = worker_cfg.get("region", region)
+    for name, machine_cfg in machines.items():
+        instance_type = machine_cfg.get("instance_type", default_instance_type)
+        vm_type = machine_cfg.get("vm_type", "regular")
+        machine_location = machine_cfg.get("region", region)
 
-        worker_subnet, worker_nsg = region_nets[worker_location]
+        machine_subnet, machine_nsg = region_nets[machine_location]
 
         public_ip = azure.network.PublicIPAddress(
             f"{name}-ip",
             resource_group_name=resource_group.name,
-            location=worker_location,
+            location=machine_location,
             public_ip_allocation_method="Static",
             sku=azure.network.PublicIPAddressSkuArgs(name="Standard"),
         )
@@ -122,15 +122,15 @@ def _create_azure_resources(workers: dict, azure_cfg: dict) -> None:
         nic = azure.network.NetworkInterface(
             f"{name}-nic",
             resource_group_name=resource_group.name,
-            location=worker_location,
+            location=machine_location,
             ip_configurations=[
                 azure.network.NetworkInterfaceIPConfigurationArgs(
                     name="primary",
-                    subnet=azure.network.SubnetArgs(id=worker_subnet.id),
+                    subnet=azure.network.SubnetArgs(id=machine_subnet.id),
                     public_ip_address=azure.network.PublicIPAddressArgs(id=public_ip.id),
                 ),
             ],
-            network_security_group=azure.network.NetworkSecurityGroupArgs(id=worker_nsg.id),
+            network_security_group=azure.network.NetworkSecurityGroupArgs(id=machine_nsg.id),
         )
 
         security_profile = None
@@ -180,7 +180,7 @@ def _create_azure_resources(workers: dict, azure_cfg: dict) -> None:
 
         vm_args = dict(
             resource_group_name=resource_group.name,
-            location=worker_location,
+            location=machine_location,
             hardware_profile=azure.compute.HardwareProfileArgs(vm_size=instance_type),
             network_profile=azure.compute.NetworkProfileArgs(
                 network_interfaces=[
@@ -206,7 +206,7 @@ def _create_azure_resources(workers: dict, azure_cfg: dict) -> None:
                 image_reference=vm_image_ref,
                 os_disk=os_disk,
             ),
-            tags={"fleet": "true", "worker": name, "vm_type": vm_type},
+            tags={"fleet": "true", "machine": name, "vm_type": vm_type},
         )
         if security_profile:
             vm_args["security_profile"] = security_profile
@@ -217,7 +217,7 @@ def _create_azure_resources(workers: dict, azure_cfg: dict) -> None:
         pulumi.export(f"{name}_id", vm.id)
 
 
-def _create_gcp_resources(workers: dict, gcp_cfg: dict) -> None:
+def _create_gcp_resources(machines: dict, gcp_cfg: dict) -> None:
     import pulumi_gcp as gcp
 
     project_id = gcp_cfg["project_id"]
@@ -269,11 +269,11 @@ def _create_gcp_resources(workers: dict, gcp_cfg: dict) -> None:
         target_tags=["fleet-worker"],
     )
 
-    for name, worker_cfg in workers.items():
-        instance_type = worker_cfg.get("instance_type", default_instance_type)
-        vm_type = worker_cfg.get("vm_type", "regular")
+    for name, machine_cfg in machines.items():
+        instance_type = machine_cfg.get("instance_type", default_instance_type)
+        vm_type = machine_cfg.get("vm_type", "regular")
         # Engine passes "region" as the override key; for GCP treat it as zone
-        worker_zone = worker_cfg.get("zone", worker_cfg.get("region", default_zone))
+        machine_zone = machine_cfg.get("zone", machine_cfg.get("region", default_zone))
 
         is_cvm = vm_type in ("snp", "tdx")
         if is_cvm:
@@ -283,7 +283,7 @@ def _create_gcp_resources(workers: dict, gcp_cfg: dict) -> None:
 
         instance_args = dict(
             project=project_id,
-            zone=worker_zone,
+            zone=machine_zone,
             machine_type=instance_type,
             boot_disk=gcp.compute.InstanceBootDiskArgs(
                 initialize_params=gcp.compute.InstanceBootDiskInitializeParamsArgs(
@@ -300,7 +300,7 @@ def _create_gcp_resources(workers: dict, gcp_cfg: dict) -> None:
                 "ssh-keys": f"{ssh_user}:{ssh_pub_key}",
             },
             tags=["fleet-worker"],
-            labels={"fleet": "true", "worker": name, "vm-type": vm_type},
+            labels={"fleet": "true", "machine": name, "vm-type": vm_type},
         )
 
         if is_cvm:
@@ -325,31 +325,31 @@ def pulumi_program() -> None:
     """Inline Pulumi program — called directly by the automation API."""
     config = pulumi.Config("claude-fleet")
 
-    workers_raw = config.get("workers") or "{}"
-    workers = json.loads(workers_raw)
+    machines_raw = config.get("machines") or "{}"
+    machines = json.loads(machines_raw)
 
-    # Group workers by provider
-    azure_workers = {}
-    gcp_workers = {}
-    for name, w_cfg in workers.items():
-        w_provider = w_cfg.get("provider", "azure")
-        if w_provider == "gcp":
-            gcp_workers[name] = w_cfg
+    # Group machines by provider
+    azure_machines = {}
+    gcp_machines = {}
+    for name, m_cfg in machines.items():
+        m_provider = m_cfg.get("provider", "azure")
+        if m_provider == "gcp":
+            gcp_machines[name] = m_cfg
         else:
-            azure_workers[name] = w_cfg
+            azure_machines[name] = m_cfg
 
-    if azure_workers:
+    if azure_machines:
         azure_cfg_raw = config.get("azure") or "{}"
         azure_cfg = json.loads(azure_cfg_raw)
         if not azure_cfg:
-            pulumi.log.warn("Azure workers requested but no azure config found")
+            pulumi.log.warn("Azure machines requested but no azure config found")
         else:
-            _create_azure_resources(azure_workers, azure_cfg)
+            _create_azure_resources(azure_machines, azure_cfg)
 
-    if gcp_workers:
+    if gcp_machines:
         gcp_cfg_raw = config.get("gcp") or "{}"
         gcp_cfg = json.loads(gcp_cfg_raw)
         if not gcp_cfg:
-            pulumi.log.warn("GCP workers requested but no gcp config found")
+            pulumi.log.warn("GCP machines requested but no gcp config found")
         else:
-            _create_gcp_resources(gcp_workers, gcp_cfg)
+            _create_gcp_resources(gcp_machines, gcp_cfg)
