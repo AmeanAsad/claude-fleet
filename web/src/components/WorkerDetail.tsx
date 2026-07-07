@@ -21,32 +21,25 @@ interface Props {
 }
 
 function messageKey(m: Message): string {
-  // Include timestamp for stability — a user could send the same prompt twice
-  // ("ok", "ok"), or the SDK could re-emit a TextBlock the JSONL already has
-  // with slightly different envelope. Timestamp collapses those edge cases.
-  const ts = m.timestamp || "";
+  // Timestamp is deliberately excluded — the same logical message arrives with
+  // different timestamps from the SSE live stream (datetime.now on the agent)
+  // vs the poll endpoint (JSONL-recorded timestamp). Including it caused every
+  // message to appear twice. Instead we key on role + content shape, using
+  // enough content to distinguish repeated identical prompts.
   const blocks = Array.isArray(m.content) ? m.content : [];
-  let text = "";
+  const parts: string[] = [];
   for (const b of blocks) {
     if (b.type === "TextBlock" && b.text) {
-      // Use a snippet + length: full text can be >100KB and blows up the Set.
-      text = `text:${b.text.length}:${b.text.slice(0, 120)}`;
-      break;
-    }
-    if (b.type === "ToolUseBlock" && b.tool_id) {
-      text = `tool:${b.tool_id}`;
-      break;
-    }
-    if (b.type === "ToolResultBlock" && b.tool_id) {
-      text = `result:${b.tool_id}`;
-      break;
-    }
-    if (b.type === "ThinkingBlock" && b.thinking) {
-      text = `thinking:${b.thinking.slice(0, 80)}`;
-      break;
+      parts.push(`text:${b.text.length}:${b.text.slice(0, 200)}`);
+    } else if (b.type === "ToolUseBlock" && b.tool_id) {
+      parts.push(`tool:${b.tool_id}`);
+    } else if (b.type === "ToolResultBlock" && b.tool_id) {
+      parts.push(`result:${b.tool_id}`);
+    } else if (b.type === "ThinkingBlock" && b.thinking) {
+      parts.push(`thinking:${b.thinking.slice(0, 80)}`);
     }
   }
-  return `${ts}|${m.role}|${m.type}|${text}`;
+  return `${m.role}|${m.type}|${parts.join(";")}`;
 }
 
 function appendUnique(prev: Message[], msg: Message): Message[] {

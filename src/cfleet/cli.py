@@ -2068,12 +2068,16 @@ async def _agent_jsonl_tailer(ws, runtime: "_AgentRuntime"):
     last_size = 0
     while True:
         try:
+            # While the SDK is running it streams events live via _agent_run_sdk.
+            # The tailer must stay silent during that window — otherwise the 0.5s
+            # poll races the SDK's writes and pushes duplicates. Only tail when
+            # the relay is idle (picks up TUI-authored writes after detach).
+            if runtime.status == "working":
+                await asyncio.sleep(0.5)
+                continue
+
             if p.exists():
                 size = p.stat().st_size
-                # Floor reads at the offset the SDK has already pushed live.
-                # This prevents double-pushing when JSONL writes lag the SDK's
-                # event stream, while still catching TUI-authored writes after
-                # detach (sdk_pushed_offset stays put while no SDK turn runs).
                 floor = max(last_size, runtime.sdk_pushed_offset)
                 if size > floor:
                     with open(p, "r") as f:
