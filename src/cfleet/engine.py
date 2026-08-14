@@ -655,7 +655,7 @@ class FleetEngine:
         worker = self.state.get_worker(name)
         machine = self._get_machine_for_worker(worker)
 
-        effective_remote = remote_path or worker.cwd or "/workspace/inbox/"
+        effective_remote = remote_path or ((worker.cwd.rstrip("/") + "/inbox/") if worker.cwd else "/workspace/inbox/")
 
         if machine.provider == "devcontainer":
             from cfleet.devcontainer import WorkerDocker
@@ -681,7 +681,7 @@ class FleetEngine:
         worker = self.state.get_worker(name)
         machine = self._get_machine_for_worker(worker)
 
-        effective_remote = remote_path or worker.cwd or "/workspace/outbox/"
+        effective_remote = remote_path or ((worker.cwd.rstrip("/") + "/outbox/") if worker.cwd else "/workspace/outbox/")
 
         if machine.provider == "devcontainer":
             from cfleet.devcontainer import WorkerDocker

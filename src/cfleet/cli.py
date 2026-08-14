@@ -1000,7 +1000,7 @@ def send(
     """Send files to a worker via rsync (or `docker cp` for devcontainer)."""
     if _use_remote_server():
         ssh_host, ssh_user, cwd, ssh_key = _resolve_worker_ssh(name)
-        dest = to or cwd or "/workspace/inbox/"
+        dest = to or ((cwd.rstrip("/") + "/inbox/") if cwd else "/workspace/inbox/")
         from cfleet.ssh import rsync_to
         rsync_to(ssh_host, ssh_user, ssh_key, local_path, dest)
         console.print(f"Sent {local_path} to [bold]{name}[/bold]:{dest}")
@@ -1022,7 +1022,7 @@ def collect(
     """Collect files from a worker via rsync (or `docker cp` for devcontainer)."""
     if _use_remote_server():
         ssh_host, ssh_user, cwd, ssh_key = _resolve_worker_ssh(name)
-        source = path or cwd or "/workspace/outbox/"
+        source = path or ((cwd.rstrip("/") + "/outbox/") if cwd else "/workspace/outbox/")
         from cfleet.ssh import rsync_from
         rsync_from(ssh_host, ssh_user, ssh_key, source, local_dest)
         console.print(f"Collected {source} from [bold]{name}[/bold] to {local_dest}")
@@ -1388,20 +1388,29 @@ def secret_set(
 ):
     """Rotate a canonical secret on the server.
 
-    Currently supports 'anthropic'. New `cfleet agent` spawns on every worker
+    Supports 'anthropic' and 'kimi'. New `cfleet agent` spawns on every worker
     pick up the rotated value automatically; in-flight processes keep their
     existing env until restarted.
     """
-    if key not in {"anthropic", "anthropic_api_key"}:
-        console.print(f"[red]Unknown secret '{key}'. Supported: anthropic[/red]")
+    if key in {"anthropic", "anthropic_api_key"}:
+        _api_request(
+            "PUT",
+            "/api/config/secrets/anthropic_api_key",
+            body={"anthropic_api_key": value},
+            role="operator",
+        )
+        console.print("[green]Anthropic key rotated.[/green]")
+    elif key in {"kimi", "kimi_api_key"}:
+        _api_request(
+            "PUT",
+            "/api/config/secrets/kimi_api_key",
+            body={"kimi_api_key": value},
+            role="operator",
+        )
+        console.print("[green]Kimi API key set.[/green]")
+    else:
+        console.print(f"[red]Unknown secret '{key}'. Supported: anthropic, kimi[/red]")
         raise typer.Exit(1)
-    _api_request(
-        "PUT",
-        "/api/config/secrets/anthropic_api_key",
-        body={"anthropic_api_key": value},
-        role="operator",
-    )
-    console.print("[green]Anthropic key rotated.[/green]")
     console.print("[dim]Existing workers keep the old key until restarted.[/dim]")
 
 
@@ -1418,6 +1427,8 @@ def secret_get():
     cfg = FleetConfig.load()
     if data.get("anthropic_api_key"):
         cfg.secrets.anthropic_api_key = data["anthropic_api_key"]
+    if data.get("kimi_api_key"):
+        cfg.secrets.kimi_api_key = data["kimi_api_key"]
     if data.get("model"):
         cfg.secrets.model = data["model"]
     cfg.save()
@@ -1574,6 +1585,7 @@ def join(
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = _json.loads(resp.read())
         pulled_api_key = data.get("anthropic_api_key", "")
+        pulled_kimi_key = data.get("kimi_api_key", "")
         pulled_model = data.get("model", "")
         console.print(f"[green]Pulled bootstrap config from {server_url}[/green]")
     except urllib.error.HTTPError as e:
@@ -1600,6 +1612,8 @@ def join(
     # Mirror into the legacy field so older code that reads server.token keeps working.
     cfg.server.token = effective_token
     cfg.secrets.anthropic_api_key = effective_api_key
+    if pulled_kimi_key:
+        cfg.secrets.kimi_api_key = pulled_kimi_key
     cfg.secrets.model = effective_model
     # Clear the legacy top-level field so resolve_anthropic_key returns the new one.
     cfg.anthropic_api_key = ""
@@ -1750,22 +1764,27 @@ def agent(
             import shutil as _sh
             _sh.copy(claude_md_src, claude_md_dst)
 
-    # Respect host auth mode: in 'oauth' mode we skip the API-key injection so
-    # `claude` falls through to ~/.claude/.credentials.json (subscription auth).
-    try:
-        _auth_mode = (Path.home() / ".cfleet" / "auth-mode").read_text().strip()
-    except FileNotFoundError:
-        _auth_mode = ""
-    if _auth_mode == "oauth":
-        os.environ.pop("ANTHROPIC_API_KEY", None)
-        os.environ.pop("CLAUDE_CODE_API_KEY", None)
+    # Provider env: third-party models (kimi-*) need ANTHROPIC_BASE_URL and
+    # their own API key regardless of auth mode.
+    from cfleet.config import resolve_provider_env as _resolve_prov
+    _provider_env = _resolve_prov(effective_model, cfg)
+
+    if _provider_env:
+        for k, v in _provider_env.items():
+            os.environ[k] = v
     else:
-        # Pull the canonical Anthropic key from the server on every spawn so a
-        # rotation via `cfleet secret set anthropic` takes effect without a
-        # config sync. Falls back to cached config on network errors.
-        api_key = _resolve_anthropic_key_fresh(cfg)
-        if api_key:
-            os.environ["ANTHROPIC_API_KEY"] = api_key
+        # Native Claude model — respect host auth mode.
+        try:
+            _auth_mode = (Path.home() / ".cfleet" / "auth-mode").read_text().strip()
+        except FileNotFoundError:
+            _auth_mode = ""
+        if _auth_mode == "oauth":
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            os.environ.pop("CLAUDE_CODE_API_KEY", None)
+        else:
+            api_key = _resolve_anthropic_key_fresh(cfg)
+            if api_key:
+                os.environ["ANTHROPIC_API_KEY"] = api_key
 
     # Surface fleet identity to child processes (git's credential.helper, etc.)
     os.environ["CFLEET_SERVER_URL"] = effective_server_url
@@ -2644,11 +2663,6 @@ def attach(
             raise typer.Exit(1)
         target = f"{ssh_user}@{ssh_host}" if ssh_user else ssh_host
         console.print(f"[dim]SSHing to {target} and attaching...[/dim]")
-        # Use a login shell so the remote user's PATH (which usually includes
-        # ~/.local/bin and the claude install) is picked up. ssh concatenates
-        # argv[2:] with spaces on the remote, so the whole `bash -lc ...`
-        # invocation must arrive as a single shell-token to keep the -lc
-        # argument intact.
         skip_flag = ""
         if skip_permissions is True:
             skip_flag = " --skip-permissions"
@@ -2661,17 +2675,22 @@ def attach(
     # Local exec path
     model = worker.get("model") or cfg.resolve_model() or "claude-opus-4-6"
     env = os.environ.copy()
-    try:
-        _auth_mode = (Path.home() / ".cfleet" / "auth-mode").read_text().strip()
-    except FileNotFoundError:
-        _auth_mode = ""
-    if _auth_mode == "oauth":
-        env.pop("ANTHROPIC_API_KEY", None)
-        env.pop("CLAUDE_CODE_API_KEY", None)
+    from cfleet.config import resolve_provider_env as _resolve_prov_attach
+    _prov_env = _resolve_prov_attach(model, cfg)
+    if _prov_env:
+        env.update(_prov_env)
     else:
-        api_key = _resolve_anthropic_key_fresh(cfg)
-        if api_key:
-            env["ANTHROPIC_API_KEY"] = api_key
+        try:
+            _auth_mode = (Path.home() / ".cfleet" / "auth-mode").read_text().strip()
+        except FileNotFoundError:
+            _auth_mode = ""
+        if _auth_mode == "oauth":
+            env.pop("ANTHROPIC_API_KEY", None)
+            env.pop("CLAUDE_CODE_API_KEY", None)
+        else:
+            api_key = _resolve_anthropic_key_fresh(cfg)
+            if api_key:
+                env["ANTHROPIC_API_KEY"] = api_key
 
     # Wire the broker env + git credential helper for `claude`'s subprocesses,
     # mirroring what `cfleet agent` does at startup. Without this, `git clone`
@@ -2739,19 +2758,66 @@ def attach(
 
     _write_lock(str(lock_path), "tui")
     our_pid = os.getpid()
-    console.print(f"[dim]Lock acquired. Launching claude --resume on session {session_id[:8]}...[/dim]")
-    claude_cmd = [claude_bin, "--resume", session_id, "--model", model]
+
+    import shutil as _shutil_screen
+    screen_bin = _shutil_screen.which("screen")
+    screen_name = f"cfleet-{name}"
+
+    claude_cmd_str = claude_bin + " --resume " + session_id + " --model " + model
     if effective_skip:
-        claude_cmd.append("--dangerously-skip-permissions")
-    try:
-        subprocess.run(claude_cmd, cwd=workspace, env=env)
-    finally:
-        if _release_lock_if_owner(str(lock_path), "tui", our_pid, "relay"):
-            console.print("[dim]Detached. Dashboard control restored.[/dim]")
+        claude_cmd_str += " --dangerously-skip-permissions"
+
+    if screen_bin:
+        # Check if a screen session for this worker already exists (previous
+        # attach survived an SSH drop). If so, just reattach to it.
+        existing = subprocess.run(
+            [screen_bin, "-ls", screen_name],
+            capture_output=True, text=True,
+        )
+        if screen_name in existing.stdout:
+            console.print(f"[dim]Reconnecting to existing session for {name}...[/dim]")
+            try:
+                subprocess.run([screen_bin, "-x", screen_name], cwd=workspace, env=env)
+            finally:
+                if _release_lock_if_owner(str(lock_path), "tui", our_pid, "relay"):
+                    console.print("[dim]Detached. Dashboard control restored.[/dim]")
         else:
-            # Common case: a dashboard `ask` preempted us. The lock has already
-            # been rewritten (or cleared) by the agent — don't touch it.
-            console.print("[dim yellow]Detached. Dashboard took over (or another process holds the lock).[/dim yellow]")
+            console.print(f"[dim]Lock acquired. Launching claude --resume in screen session '{screen_name}'...[/dim]")
+            # Write env vars to a temp file so screen inherits them — screen
+            # doesn't forward the parent's env to the child shell.
+            env_script = Path(workspace) / ".cfleet-attach-env.sh"
+            try:
+                lines = ["#!/bin/bash"]
+                for k, v in env.items():
+                    if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "CFLEET_", "GIT_CONFIG_", "GH_", "PATH")):
+                        lines.append(f"export {k}={__import__('shlex').quote(v)}")
+                lines.append(f"cd {__import__('shlex').quote(workspace)}")
+                lines.append(f"exec {claude_cmd_str}")
+                env_script.write_text("\n".join(lines) + "\n")
+                env_script.chmod(0o700)
+                subprocess.run(
+                    [screen_bin, "-S", screen_name, "-t", name, str(env_script)],
+                    cwd=workspace, env=env,
+                )
+            finally:
+                env_script.unlink(missing_ok=True)
+                if _release_lock_if_owner(str(lock_path), "tui", our_pid, "relay"):
+                    console.print("[dim]Detached. Dashboard control restored.[/dim]")
+                else:
+                    console.print("[dim yellow]Detached. Dashboard took over (or another process holds the lock).[/dim yellow]")
+    else:
+        console.print(f"[dim]Lock acquired. Launching claude --resume on session {session_id[:8]}...[/dim]")
+        console.print("[dim yellow]screen not found — session will not survive SSH disconnects. Install screen for persistence.[/dim yellow]")
+        claude_cmd = [claude_bin, "--resume", session_id, "--model", model]
+        if effective_skip:
+            claude_cmd.append("--dangerously-skip-permissions")
+        try:
+            subprocess.run(claude_cmd, cwd=workspace, env=env)
+        finally:
+            if _release_lock_if_owner(str(lock_path), "tui", our_pid, "relay"):
+                console.print("[dim]Detached. Dashboard control restored.[/dim]")
+            else:
+                console.print("[dim yellow]Detached. Dashboard took over (or another process holds the lock).[/dim yellow]")
 
 
 # --------------------------------------------------------------------------

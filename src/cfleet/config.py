@@ -196,6 +196,7 @@ class SecretsConfig(BaseModel):
     On a fresh client this is empty until the client connects and pulls.
     """
     anthropic_api_key: str = ""
+    kimi_api_key: str = ""
     model: str = ""  # default model joiners adopt (falls back to top-level FleetConfig.model)
 
 
@@ -288,6 +289,38 @@ class FleetConfig(BaseModel):
 
     def resolve_mcp_config(self) -> Path:
         return Path(self.mcp_config).expanduser()
+
+    def resolve_provider_env(self, model: str) -> dict[str, str]:
+        """Return env-var overrides for non-Anthropic model providers.
+
+        When the model is a third-party model served behind an
+        Anthropic-compatible endpoint (e.g. Kimi K3 via Moonshot), we need to
+        set ANTHROPIC_BASE_URL and swap the API key. Returns an empty dict for
+        native Claude models.
+        """
+        return resolve_provider_env(model, self)
+
+
+PROVIDER_ENDPOINTS: dict[str, str] = {
+    "kimi": "https://api.moonshot.ai/anthropic",
+}
+
+
+def resolve_provider_env(model: str, cfg: "FleetConfig | None" = None) -> dict[str, str]:
+    """Return env-var overrides for third-party model providers.
+
+    Callable without a config (returns only the base URL) or with one (also
+    resolves the API key from secrets).
+    """
+    if model.startswith("kimi-"):
+        env: dict[str, str] = {"ANTHROPIC_BASE_URL": PROVIDER_ENDPOINTS["kimi"]}
+        if cfg:
+            key = cfg.secrets.kimi_api_key
+            if key:
+                env["ANTHROPIC_API_KEY"] = key
+                env["CLAUDE_CODE_API_KEY"] = key
+        return env
+    return {}
 
 
 # ---------------------------------------------------------------------------

@@ -301,20 +301,26 @@ class MachineAgent:
                 )
 
         env = os.environ.copy()
-        # Auth mode: `cfleet auth oauth` on this host writes ~/.cfleet/auth-mode
-        # to 'oauth' — in that mode we deliberately DO NOT inject the API key
-        # so `claude` falls through to ~/.claude/.credentials.json and uses
-        # the operator's subscription instead of billing the API.
-        try:
-            auth_mode = (Path.home() / ".cfleet" / "auth-mode").read_text().strip()
-        except FileNotFoundError:
-            auth_mode = ""
-        if auth_mode == "oauth":
-            env.pop("ANTHROPIC_API_KEY", None)
-            env.pop("CLAUDE_CODE_API_KEY", None)
+        effective_model = model or self.model
+        # Provider env: third-party models (kimi-*) need ANTHROPIC_BASE_URL
+        # and their own API key regardless of auth mode.
+        from cfleet.config import resolve_provider_env
+        provider_env = resolve_provider_env(effective_model, config)
+
+        if provider_env:
+            env.update(provider_env)
         else:
-            env["ANTHROPIC_API_KEY"] = self.api_key or config.anthropic_api_key
-            env["CLAUDE_CODE_API_KEY"] = env["ANTHROPIC_API_KEY"]
+            # Native Claude model — respect host auth mode.
+            try:
+                auth_mode = (Path.home() / ".cfleet" / "auth-mode").read_text().strip()
+            except FileNotFoundError:
+                auth_mode = ""
+            if auth_mode == "oauth":
+                env.pop("ANTHROPIC_API_KEY", None)
+                env.pop("CLAUDE_CODE_API_KEY", None)
+            else:
+                env["ANTHROPIC_API_KEY"] = self.api_key or config.anthropic_api_key
+                env["CLAUDE_CODE_API_KEY"] = env["ANTHROPIC_API_KEY"]
 
         # Read the marker file to pick up a persisted session_id so respawns
         # resume the existing conversation instead of starting fresh.

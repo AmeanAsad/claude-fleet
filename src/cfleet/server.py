@@ -762,6 +762,7 @@ def create_server_app() -> FastAPI:
         config = FleetConfig.load()
         return {
             "anthropic_api_key": config.resolve_anthropic_key(),
+            "kimi_api_key": config.secrets.kimi_api_key,
             "model": config.resolve_model(),
         }
 
@@ -772,6 +773,7 @@ def create_server_app() -> FastAPI:
         config = FleetConfig.load()
         return {
             "anthropic_api_key": config.resolve_anthropic_key(),
+            "kimi_api_key": config.secrets.kimi_api_key,
             "model": config.resolve_model(),
         }
 
@@ -785,9 +787,20 @@ def create_server_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="anthropic_api_key required")
         config = FleetConfig.load()
         config.secrets.anthropic_api_key = new_key
-        # Clear legacy field to make the new field the source of truth going
-        # forward; readers fall back to legacy only if secrets is empty.
         config.anthropic_api_key = ""
+        config.save()
+        return {"ok": True, "rotated_at": datetime.now(timezone.utc).isoformat()}
+
+    @app.put("/api/config/secrets/kimi_api_key")
+    async def rotate_kimi_key(request: Request):
+        """Operator-only: set or rotate the Kimi (Moonshot) API key."""
+        await _verify_operator(request)
+        body = await request.json()
+        new_key = (body.get("kimi_api_key") or "").strip()
+        if not new_key:
+            raise HTTPException(status_code=400, detail="kimi_api_key required")
+        config = FleetConfig.load()
+        config.secrets.kimi_api_key = new_key
         config.save()
         return {"ok": True, "rotated_at": datetime.now(timezone.utc).isoformat()}
 
