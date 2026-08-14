@@ -227,6 +227,7 @@ class SpawnRequest(BaseModel):
     repos: list[str] | None = None
     region: str | None = None
     cwd: str | None = None  # working dir on external machines
+    agent_backend: str = "claude"  # claude | prime
 
 
 class AskRequest(BaseModel):
@@ -485,6 +486,7 @@ def create_server_app() -> FastAPI:
         reg_ssh_host = reg.get("ssh_host", "")
         reg_ssh_user = reg.get("ssh_user", "")
         reg_skip_perms = reg.get("skip_permissions", True)
+        reg_agent_backend = reg.get("agent_backend", "")
 
         cw = await _hub.register(ws, worker_name, machine_name)
 
@@ -512,6 +514,8 @@ def create_server_app() -> FastAPI:
             if reg_model:
                 w.model = reg_model
             w.skip_permissions = bool(reg_skip_perms)
+            if reg_agent_backend in ("claude", "prime"):
+                w.agent_backend = reg_agent_backend
 
             # Register / refresh the machine record so `cfleet attach` can find SSH info.
             # Only touch ssh fields / status when the machine is "external" (BYO via
@@ -890,6 +894,7 @@ def create_server_app() -> FastAPI:
                 "model": w.model,
                 "repos": w.repos,
                 "skip_permissions": w.skip_permissions,
+                "agent_backend": w.agent_backend,
             }
             for w in workers
         ]
@@ -914,6 +919,7 @@ def create_server_app() -> FastAPI:
             "repos": body.get("repos", []),
             "cwd": body.get("cwd", ""),
             "skip_permissions": bool(body.get("skip_permissions", True)),
+            "agent_backend": body.get("agent_backend", "claude"),
         })
         return result
 
@@ -942,6 +948,7 @@ def create_server_app() -> FastAPI:
         if worker:
             payload["session_id"] = worker.session_id or ""
             payload["cwd"] = worker.cwd or ""
+            payload["agent_backend"] = worker.agent_backend or "claude"
 
         result = await cm.send_command(payload)
         return result
@@ -985,6 +992,7 @@ def create_server_app() -> FastAPI:
             "session_id": worker.session_id,
             "cwd": worker.cwd,
             "skip_permissions": worker.skip_permissions,
+            "agent_backend": worker.agent_backend or "claude",
             "connected": connected,
         }
         if machine:
@@ -1036,6 +1044,7 @@ def create_server_app() -> FastAPI:
                     region=req.region,
                     provider=req.provider,
                     cwd=req.cwd,
+                    agent_backend=req.agent_backend,
                 ),
                 cleanup_worker=req.name,
             )

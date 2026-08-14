@@ -335,8 +335,11 @@ class FleetEngine:
         region: str | None = None,
         cwd: str | None = None,
         skip_permissions: bool = True,
+        agent_backend: str = "claude",
     ) -> WorkerState:
         """Spawn a new worker on a machine. Auto-creates machine if needed."""
+        if agent_backend not in ("claude", "prime"):
+            raise ValueError(f"Unknown agent backend '{agent_backend}'. Use 'claude' or 'prime'.")
         if name in self.state.workers:
             raise ValueError(f"Worker '{name}' already exists. Kill it first or choose a different name.")
 
@@ -371,6 +374,7 @@ class FleetEngine:
             model=effective_model,
             repos=effective_repos,
             status="spawning",
+            agent_backend=agent_backend,
         )
         self.state.add_worker(worker)
         self._save_state()
@@ -425,6 +429,7 @@ class FleetEngine:
             "model": model,
             "repos": repos,
             "skip_permissions": skip_permissions,
+            "agent_backend": worker.agent_backend or "claude",
         }
         if cwd:
             payload["cwd"] = cwd
@@ -573,6 +578,7 @@ class FleetEngine:
             "model": effective_model,
             "repos": [],
             "skip_permissions": skip_permissions,
+            "agent_backend": worker.agent_backend or "claude",
         }
         if cwd:
             payload["cwd"] = cwd

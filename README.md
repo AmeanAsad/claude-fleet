@@ -149,6 +149,32 @@ cfleet spawn agent-4 --provider gcp   # auto-create a GCP VM
 
 Workers accept prompts, run them through Claude Code, and stream back results. The full conversation history (thinking, tool calls, responses) is available via `logs` and `messages`.
 
+#### Prime-agent workers (`--backend prime`)
+
+Workers can alternatively run a [prime-agent](https://primeintellect.ai) session instead of Claude Code:
+
+```bash
+cfleet spawn researcher --backend prime            # prime-agent worker
+cfleet spawn researcher --backend prime --model kimi-k3
+cfleet ask researcher "Summarize the latest arXiv RL papers"
+cfleet attach researcher                           # native `prime-agent attach` TUI
+```
+
+Prime mode maps fleet operations onto prime-agent's native daemon:
+
+| Fleet op | Prime-agent mechanism |
+|---|---|
+| `spawn` | Creates a named **resident daemon session** (survives relay/machine restarts) |
+| `ask` | `prime-agent send` — delivers even while busy (steers), auto-wakes idle-evicted sessions |
+| `logs` / `messages` | The session JSONL, converted to the same message schema (thinking/text/tool blocks) |
+| `attach` | `prime-agent attach <worker>` — detach any time; the session keeps running |
+| `restart` | Relay re-adopts the still-resident session; full history and (while resident) kernel state survive |
+| `kill` | `prime-agent stop` (session stays resumable); `--purge` deletes the transcript |
+
+Perks that come free with the backend: `prime-agent schedule add <worker> "0 9 * * 1-5" -- "Review open work"` for cron prompts, RLM sub-agents inside a worker, and per-machine model auth via prime-agent's own `~/.prime/agent` config.
+
+Requirements on the worker machine: prime-agent ≥ 0.7.2 installed and authenticated (`prime-agent /login` or an API-key env var). Model auth is prime-agent's own — the fleet does not inject API keys for prime workers. `interrupt` is not supported for prime workers yet (prime-agent exposes no public per-session abort); `ask` while busy steers instead of erroring.
+
 ### Central Server
 
 The server is the communication hub. Workers connect outbound to it via WebSocket. The CLI, TUI, and web dashboard all talk to the server's REST API.

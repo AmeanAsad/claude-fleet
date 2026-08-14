@@ -358,6 +358,7 @@ class WorkerState(BaseModel):
     github_level: str = "none"  # none | read | triage | write
     local_mode: bool = False  # True when started via `cfleet agent`
     skip_permissions: bool = True  # SDK runs in bypassPermissions; attach passes --dangerously-skip-permissions
+    agent_backend: str = "claude"  # claude | prime — which agent runtime the worker drives
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_prompt: Optional[str] = None
     last_prompt_at: Optional[str] = None

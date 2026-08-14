@@ -798,12 +798,16 @@ def spawn(
     provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Provider for auto-created machine"),
     gh: Optional[str] = typer.Option(None, "--gh", help="GitHub access level: read, triage, or write"),
     skip_permissions: bool = typer.Option(True, "--skip-permissions/--no-skip-permissions", help="Run with --dangerously-skip-permissions (default: on)"),
+    backend: str = typer.Option("claude", "--backend", help="Agent runtime: 'claude' (default) or 'prime' (prime-agent daemon session)"),
 ):
     """Spawn a new fleet worker on a machine."""
     from cfleet.config import GitHubLevel, VMType
 
     if gh:
         _validate_enum(gh, GitHubLevel, "--gh")
+    if backend not in ("claude", "prime"):
+        console.print(f"[red]Invalid --backend '{backend}'. Use 'claude' or 'prime'.[/red]")
+        raise typer.Exit(1)
 
     resolved_vm_type = None
     if vm_type:
@@ -821,6 +825,7 @@ def spawn(
         provider=provider,
         cwd=cwd,
         skip_permissions=skip_permissions,
+        agent_backend=backend,
     )
 
     if gh:
@@ -843,6 +848,7 @@ def list_workers():
                 "status": w.get("status", ""),
                 "relay_port": w.get("relay_port", ""),
                 "model": w.get("model", ""),
+                "backend": w.get("agent_backend", "claude") or "claude",
                 "last_prompt": w.get("last_prompt", ""),
                 "connected": w.get("connected", False),
             }
@@ -857,6 +863,7 @@ def list_workers():
                 "status": w.status,
                 "relay_port": w.relay_port,
                 "model": w.model,
+                "backend": w.agent_backend or "claude",
                 "last_prompt": w.last_prompt,
                 "connected": None,
             }
@@ -871,7 +878,7 @@ def list_workers():
     table.add_column("Name", style="bold")
     table.add_column("Machine")
     table.add_column("Status")
-    table.add_column("Port")
+    table.add_column("Backend")
     table.add_column("Model")
     table.add_column("Last Prompt")
 
@@ -895,7 +902,7 @@ def list_workers():
             w["name"],
             w["machine_name"] or "-",
             f"[{color}]{status}[/{color}]",
-            str(w["relay_port"]),
+            w["backend"],
             w["model"] or "-",
             prompt_display,
         )
@@ -1705,12 +1712,15 @@ def agent(
     ssh_user: Optional[str] = typer.Option(None, "--ssh-user", help="SSH login user (defaults to $USER)"),
     skip_permissions: bool = typer.Option(True, "--skip-permissions/--no-skip-permissions", help="Run with --dangerously-skip-permissions (default: on)"),
     session_id_override: Optional[str] = typer.Option(None, "--session-id", help="Resume an existing session (used internally by machine agent on respawn)"),
+    backend: str = typer.Option("claude", "--backend", help="Agent runtime: 'claude' (Claude Code SDK) or 'prime' (prime-agent daemon session)"),
 ):
-    """Start a headless Claude Code worker registered with the fleet.
+    """Start a headless worker registered with the fleet.
 
-    Runs the Claude Code SDK in-process and connects to the fleet server via
-    WebSocket. The dashboard is the primary UI — prompts sent there execute
-    here. Use `cfleet attach <name>` to drop into a TUI on the same session.
+    With the default claude backend, runs the Claude Code SDK in-process and
+    connects to the fleet server via WebSocket. With --backend prime, drives a
+    resident prime-agent daemon session instead. The dashboard is the primary
+    UI — prompts sent there execute here. Use `cfleet attach <name>` to drop
+    into a TUI on the same session.
     """
     import asyncio
     import platform
@@ -1843,6 +1853,24 @@ def agent(
         except Exception:
             pass
 
+    if backend == "prime":
+        _run_prime_agent_worker(
+            name=name,
+            workspace=workspace,
+            marker_path=marker_path,
+            existing_session_id=existing_session_id,
+            model=model or "",
+            server_url=effective_server_url,
+            token=effective_token,
+            machine_name=machine_name,
+            ssh_host=ssh_host or "",
+            ssh_user=ssh_user or "",
+        )
+        return
+    if backend != "claude":
+        console.print(f"[red]Unknown backend '{backend}'. Use 'claude' or 'prime'.[/red]")
+        raise typer.Exit(1)
+
     session_id = existing_session_id or str(uuid.uuid4())
     try:
         import json as _mj2
@@ -1888,6 +1916,101 @@ def agent(
         except Exception:
             pass
         console.print(f"\n[dim]Worker {name} stopped.[/dim]")
+
+
+def _run_prime_agent_worker(
+    *,
+    name: str,
+    workspace: str,
+    marker_path,  # Path to .cfleet-worker in the worker dir
+    existing_session_id: Optional[str],
+    model: str,
+    server_url: str,
+    token: str,
+    machine_name: str,
+    ssh_host: str,
+    ssh_user: str,
+) -> None:
+    """Run the fleet worker loop on top of a resident prime-agent session.
+
+    The prime session lives in the machine's prime-agent daemon and survives
+    this relay process — restarts re-adopt it by worker name, so the
+    conversation (and, while resident, the IPython kernel) persists.
+    """
+    import asyncio
+    import json as _json
+    from cfleet.prime_backend import (
+        PrimeAgentBackend,
+        PrimeBackendError,
+        check_prime_available,
+        run_prime_worker,
+    )
+
+    problem = check_prime_available()
+    if problem:
+        console.print(f"[red]prime-agent backend unavailable: {problem}[/red]")
+        raise typer.Exit(1)
+
+    # Model handling: only an explicit --model is forwarded to prime-agent;
+    # otherwise the daemon's own default model is used (prime auth lives in
+    # ~/.prime/agent on the worker machine, not in fleet config).
+    backend = PrimeAgentBackend(name, workspace, model or None)
+
+    console.print(f"Starting prime-agent worker [bold]{name}[/bold] on {machine_name}")
+    console.print(f"  Server:  {server_url}")
+    console.print(f"  CWD:     {workspace}")
+
+    try:
+        info = backend.ensure_session(resume_session_id=existing_session_id)
+    except PrimeBackendError as e:
+        console.print(f"[red]Failed to obtain prime-agent session: {e}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"  Session: {info.session_id} ({info.lifecycle or 'live'})")
+    console.print(f"  File:    {info.session_file}")
+    if info.session_id and info.session_file:
+        console.print(f"[dim]Dashboard sends prompts via `prime-agent send {name}`.[/dim]")
+
+    # Persist identity for restarts/respawns.
+    try:
+        marker_path.write_text(_json.dumps({
+            "name": name,
+            "backend": "prime",
+            "session_id": info.session_id,
+            "session_file": info.session_file,
+        }) + "\n")
+    except Exception:
+        pass
+
+    # Resolve the display model (truthful even when defaulted by the daemon).
+    display_model = model or info.model
+    if not display_model:
+        try:
+            display_model = backend.status().get("model", "") or ""
+        except Exception:
+            display_model = ""
+
+    detected_host, detected_user = _detect_ssh_target()
+    effective_ssh_host = ssh_host if ssh_host else detected_host
+    effective_ssh_user = ssh_user if ssh_user else detected_user
+
+    try:
+        asyncio.run(run_prime_worker(
+            server_url=server_url,
+            token=token,
+            worker_name=name,
+            machine_name=machine_name,
+            model=display_model,
+            cwd=workspace,
+            ssh_host=effective_ssh_host,
+            ssh_user=effective_ssh_user,
+            resume_session_id=info.session_id or None,
+            info=info,
+        ))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        console.print(f"\n[dim]Worker {name} relay stopped (prime session persists).[/dim]")
 
 
 class _AgentRuntime:
@@ -2672,7 +2795,25 @@ def attach(
         rc = subprocess.run(["ssh", "-t", target, remote_cmd]).returncode
         raise typer.Exit(rc)
 
-    # Local exec path
+    # Local exec path — prime-agent workers attach natively via the daemon.
+    if (worker.get("agent_backend") or "claude") == "prime":
+        import subprocess as _sp
+        from cfleet.prime_backend import PrimeAgentBackend, check_prime_available
+
+        problem = check_prime_available()
+        if problem:
+            console.print(f"[red]prime-agent unavailable here: {problem}[/red]")
+            raise typer.Exit(1)
+        backend = PrimeAgentBackend(name, workspace)
+        try:
+            console.print(f"[dim]Waking prime session for {name} (if needed)...[/dim]")
+            backend.wake()
+        except Exception as e:
+            console.print(f"[yellow]Could not wake session ({e}); trying attach anyway.[/yellow]")
+        console.print(f"[dim]Attaching to prime-agent session '{name}' — detaching leaves it running.[/dim]")
+        rc = _sp.run(["prime-agent", "attach", name], cwd=workspace).returncode
+        raise typer.Exit(rc)
+
     model = worker.get("model") or cfg.resolve_model() or "claude-opus-4-6"
     env = os.environ.copy()
     from cfleet.config import resolve_provider_env as _resolve_prov_attach

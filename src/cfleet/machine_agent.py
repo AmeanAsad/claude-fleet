@@ -242,6 +242,7 @@ class MachineAgent:
                     repos=rec.get("repos", []) or [],
                     cwd=rec.get("cwd", ""),
                     skip_permissions=bool(rec.get("skip_permissions", True)),
+                    agent_backend=rec.get("agent_backend", "claude") or "claude",
                 )
             except Exception as e:
                 print(f"[machine] Respawn of {name} failed: {e}")
@@ -267,6 +268,7 @@ class MachineAgent:
         repos: list,
         cwd: str,
         skip_permissions: bool,
+        agent_backend: str = "claude",
     ) -> None:
         """Common worker-launch logic — used by both operator-initiated spawn and
         reconcile-respawn after a host reboot.
@@ -341,6 +343,7 @@ class MachineAgent:
             "--server-url", self.server_url,
             "--token", self.token,
             "--skip-permissions" if skip_permissions else "--no-skip-permissions",
+            "--backend", agent_backend or "claude",
         ]
         if marker_session_id:
             cmd.extend(["--session-id", marker_session_id])
@@ -355,6 +358,7 @@ class MachineAgent:
         raw_cwd = data.get("cwd", "")
         cwd = os.path.abspath(os.path.expanduser(raw_cwd)) if raw_cwd else ""
         skip_permissions = bool(data.get("skip_permissions", True))
+        agent_backend = data.get("agent_backend", "claude") or "claude"
 
         if worker_name in self.workers:
             await ws.send(json.dumps({
@@ -365,7 +369,7 @@ class MachineAgent:
             return
 
         try:
-            self._launch_worker(worker_name, model, repos, cwd, skip_permissions)
+            self._launch_worker(worker_name, model, repos, cwd, skip_permissions, agent_backend=agent_backend)
 
             await ws.send(json.dumps({
                 "type": "response",
@@ -448,6 +452,23 @@ class MachineAgent:
                     _shutil.rmtree(sidecar, ignore_errors=True)
             except Exception as e:
                 print(f"[machine] purge_session failed for {worker_name}: {e}")
+
+        # Prime-agent workers: the relay is only a thin bridge — the actual agent
+        # session lives in the prime-agent daemon and survives the relay's death.
+        # Stop the resident session so `cfleet kill` really means kill; skip the
+        # stop when the purge came from `cfleet restart` (purge_session=False is
+        # how restart signals "keep the conversation").
+        if data.get("agent_backend") == "prime":
+            try:
+                from cfleet.prime_backend import PrimeAgentBackend, PrimeBackendError
+                backend = PrimeAgentBackend(worker_name, cwd or "")
+                if purge_session:
+                    backend.stop()
+                    purged = backend.purge_files(session_id) or purged
+                else:
+                    backend.stop()
+            except Exception as e:
+                print(f"[machine] prime-agent stop failed for {worker_name}: {e}")
 
         await ws.send(json.dumps({
             "type": "response",
