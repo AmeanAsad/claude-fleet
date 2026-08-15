@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 
 PRIME_BIN = shutil.which("prime-agent") or "prime-agent"
-MIN_PRIME_VERSION = (0, 7, 2)  # send-wakes-saved + RPC heartbeat promotion required
+MIN_PRIME_VERSION = (0, 7, 0)  # send-wakes-saved + RPC heartbeat promotion (validated on 0.7.0 + 0.7.2)
 
 # Session name used inside prime-agent == fleet worker name.
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
