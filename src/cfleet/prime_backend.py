@@ -211,6 +211,20 @@ def list_sessions(include_saved: bool = True) -> list[dict]:
     raise PrimeBackendError(f"prime-agent list failed: {last_err[:300]}")
 
 
+def _is_resident(entry: dict) -> bool:
+    """True only if a real resident worker backs this catalog entry.
+
+    `prime-agent list --all` may report lifecycle "live" for an idle-evicted
+    session whose worker is actually gone. A genuinely resident session has a
+    short daemon activeSessionId distinct from the long session UUID.
+    """
+    if entry.get("lifecycle") not in ("live", "draft"):
+        return False
+    aid = entry.get("activeSessionId") or entry.get("id") or ""
+    sid = entry.get("sessionId") or ""
+    return bool(aid) and aid != sid
+
+
 def find_session_by_name(worker_name: str) -> dict | None:
     """Find a top-level prime session whose display name is exactly `worker_name`.
 
@@ -227,8 +241,8 @@ def find_session_by_name(worker_name: str) -> dict | None:
         matches.append(s)
     if not matches:
         return None
-    # Prefer a live/draft session over a saved one.
-    matches.sort(key=lambda s: 0 if s.get("lifecycle") in ("live", "draft") else 1)
+    # Prefer a genuinely resident session over a saved one.
+    matches.sort(key=lambda s: 0 if _is_resident(s) else 1)
     return matches[0]
 
 
@@ -440,15 +454,23 @@ class PrimeAgentBackend:
     def wake(self) -> PrimeSessionInfo:
         """Ensure the session is live (resident) WITHOUT injecting a prompt.
 
-        Live/draft sessions are returned as-is. Saved/archived ones are resumed
-        through the RPC promotion path (which preserves name + full history).
+        Resident sessions are returned as-is. Saved/archived/evicted ones are
+        resumed through the RPC promotion path (preserves name + full history).
         A missing session is created fresh.
         """
         entry = find_session_by_name(self.worker_name)
-        if entry is not None and entry.get("lifecycle") in ("live", "draft"):
+        if entry is not None and _is_resident(entry):
             return PrimeSessionInfo.from_list_entry(self.worker_name, entry)
         resume_id = (entry or {}).get("sessionId") or None
-        return self._rpc_create_session(resume_session_id=resume_id)
+        try:
+            return self._rpc_create_session(resume_session_id=resume_id)
+        except PrimeBackendError:
+            # Resume can fail if the session became resident concurrently
+            # (e.g. a fleet ask raced us). Adopt if so.
+            entry = find_session_by_name(self.worker_name)
+            if entry is not None and _is_resident(entry):
+                return PrimeSessionInfo.from_list_entry(self.worker_name, entry)
+            raise
 
     def stop(self) -> None:
         """Stop the resident worker (session stays saved + resumable).
