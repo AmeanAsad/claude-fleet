@@ -359,11 +359,17 @@ class PrimeAgentBackend:
         return self._rpc_create_session(resume_session_id=resume_id)
 
     def stop(self) -> None:
-        """Stop the resident worker (session stays saved + resumable)."""
+        """Stop the resident worker (session stays saved + resumable).
+
+        Idempotent: an already-stopped or unknown session is a no-op.
+        """
         cp = _run_prime(["stop", self.worker_name, "--json"], timeout=30)
         out = (cp.stdout or "") + (cp.stderr or "")
-        if cp.returncode != 0 and "not" not in out.lower():
-            raise PrimeBackendError(f"prime-agent stop failed: {out.strip()[:300]}")
+        if cp.returncode != 0:
+            benign = ("unknown" in out.lower() or "not found" in out.lower()
+                      or "no active" in out.lower() or '"success":true' in out.lower())
+            if not benign:
+                raise PrimeBackendError(f"prime-agent stop failed: {out.strip()[:300]}")
 
     def purge_files(self, session_id: str | None = None) -> bool:
         """Delete the session JSONL and artifact dir from disk. Best-effort.

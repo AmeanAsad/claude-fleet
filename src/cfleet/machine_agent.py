@@ -460,15 +460,19 @@ class MachineAgent:
         # how restart signals "keep the conversation").
         if data.get("agent_backend") == "prime":
             try:
-                from cfleet.prime_backend import PrimeAgentBackend, PrimeBackendError
+                from cfleet.prime_backend import PrimeAgentBackend
                 backend = PrimeAgentBackend(worker_name, cwd or "")
+                try:
+                    backend.stop()
+                except Exception as e:
+                    print(f"[machine] prime-agent stop failed for {worker_name}: {e}")
                 if purge_session:
-                    backend.stop()
-                    purged = backend.purge_files(session_id) or purged
-                else:
-                    backend.stop()
+                    try:
+                        purged = backend.purge_files(session_id) or purged
+                    except Exception as e:
+                        print(f"[machine] prime session purge failed for {worker_name}: {e}")
             except Exception as e:
-                print(f"[machine] prime-agent stop failed for {worker_name}: {e}")
+                print(f"[machine] prime backend cleanup failed for {worker_name}: {e}")
 
         await ws.send(json.dumps({
             "type": "response",
