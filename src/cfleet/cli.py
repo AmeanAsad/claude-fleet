@@ -505,8 +505,13 @@ def machine_agent_cmd(
 
     api_key = _resolve_anthropic_key_fresh(cfg)
     if not api_key:
-        console.print("[red]ANTHROPIC_API_KEY missing — set it in ~/.cfleet/config.yml or env.[/red]")
-        raise typer.Exit(1)
+        # Not fatal: prime-agent workers authenticate through prime-agent's own
+        # per-machine config, not this key. Claude workers spawned without a key
+        # will fail at first turn with an auth error.
+        console.print(
+            "[yellow]ANTHROPIC_API_KEY missing — claude workers will fail to authenticate. "
+            "prime-agent workers are unaffected.[/yellow]"
+        )
 
     agent = MachineAgent(
         server_url=effective_server_url,
