@@ -27,8 +27,39 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-PRIME_BIN = shutil.which("prime-agent") or "prime-agent"
 MIN_PRIME_VERSION = (0, 7, 0)  # send-wakes-saved + RPC heartbeat promotion (validated on 0.7.0 + 0.7.2)
+
+
+def resolve_prime_bin() -> str | None:
+    """Locate the prime-agent CLI.
+
+    Order: PRIME_AGENT_BIN env override → PATH → common install dirs. The
+    install-dir fallbacks matter because fleet relays and `cfleet attach` are
+    often launched from non-interactive shells (nohup, systemd, ssh bash -lc)
+    whose PATH lacks npm-global/local bins.
+    """
+    override = os.environ.get("PRIME_AGENT_BIN", "").strip()
+    if override and Path(override).exists():
+        return override
+    found = shutil.which("prime-agent")
+    if found:
+        return found
+    home = Path.home()
+    for candidate in (
+        home / ".npm-global" / "bin" / "prime-agent",
+        home / ".local" / "bin" / "prime-agent",
+        Path("/usr/local/bin/prime-agent"),
+        Path("/opt/homebrew/bin/prime-agent"),
+    ):
+        try:
+            if candidate.exists():
+                return str(candidate)
+        except OSError:
+            continue
+    return None
+
+
+PRIME_BIN = resolve_prime_bin() or "prime-agent"
 
 # Session name used inside prime-agent == fleet worker name.
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -63,7 +94,7 @@ def _run_prime(args: list[str], timeout: float = 30.0, input_text: str | None = 
     """Run a prime-agent CLI command. Never raises on non-zero; caller checks."""
     try:
         return subprocess.run(
-            [PRIME_BIN, *args],
+            [resolve_prime_bin() or "prime-agent", *args],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -90,8 +121,9 @@ def prime_version() -> tuple[int, int, int] | None:
 
 def check_prime_available() -> str | None:
     """Return a human-readable problem string, or None if prime-agent looks usable."""
-    if not shutil.which("prime-agent"):
-        return "prime-agent CLI not found on PATH (install: https://primeintellect.ai prime-agent)"
+    if not resolve_prime_bin():
+        return ("prime-agent CLI not found on PATH or in common install dirs "
+                "(install: https://primeintellect.ai prime-agent, or set PRIME_AGENT_BIN)")
     v = prime_version()
     if v is None:
         return "could not determine prime-agent version"
@@ -205,7 +237,7 @@ class PrimeAgentBackend:
             args += ["--model", self.model]
 
         proc = subprocess.Popen(
-            [PRIME_BIN, *args],
+            [resolve_prime_bin() or "prime-agent", *args],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

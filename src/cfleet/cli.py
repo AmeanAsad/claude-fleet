@@ -2814,21 +2814,13 @@ def attach(
 
     if attach_backend == "prime":
         import subprocess as _sp
-        import shutil as _shutil_pa
-        from cfleet.prime_backend import PrimeAgentBackend, check_prime_available
+        from cfleet.prime_backend import (
+            PrimeAgentBackend,
+            check_prime_available,
+            resolve_prime_bin,
+        )
 
-        prime_bin = _shutil_pa.which("prime-agent")
-        if not prime_bin:
-            # Non-interactive SSH gives a minimal PATH; check common install spots.
-            home = os.environ.get("HOME", "")
-            for candidate in (
-                f"{home}/.npm-global/bin/prime-agent",
-                f"{home}/.local/bin/prime-agent",
-                "/usr/local/bin/prime-agent",
-            ):
-                if Path(candidate).exists():
-                    prime_bin = candidate
-                    break
+        prime_bin = resolve_prime_bin()
         if not prime_bin:
             console.print("[red]`prime-agent` CLI not found on PATH or in common install dirs.[/red]")
             raise typer.Exit(1)
