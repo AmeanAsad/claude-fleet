@@ -376,6 +376,11 @@ class FleetEngine:
             status="spawning",
             agent_backend=agent_backend,
         )
+        if cwd:
+            # Persist the launch cwd so machine-agent reboot-respawn lands the
+            # worker back in the right directory (the marker file there holds
+            # its session identity).
+            worker.cwd = cwd
         self.state.add_worker(worker)
         self._save_state()
 

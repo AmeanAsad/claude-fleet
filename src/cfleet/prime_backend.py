@@ -136,19 +136,79 @@ def check_prime_available() -> str | None:
 # daemon queries
 # ---------------------------------------------------------------------------
 
+def _daemon_unreachable(err_text: str) -> bool:
+    t = err_text.lower()
+    return "daemon" in t and ("enoent" in t or "failed to connect" in t or "unreachable" in t)
+
+
+def ensure_daemon(timeout: float = 60.0) -> None:
+    """Make sure the prime-agent daemon is running.
+
+    Read-only CLI commands (`list`, `status`, `doctor`) do NOT auto-start the
+    daemon — after a cold boot they fail with connect ENOENT. A short-lived
+    RPC client takes the normal client auto-start path and brings it up.
+    """
+    proc = subprocess.Popen(
+        [resolve_prime_bin() or "prime-agent", "--mode", "rpc"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=_clean_prime_env(),
+    )
+    try:
+        assert proc.stdin and proc.stdout
+        proc.stdin.write(json.dumps({"id": "fleet-daemon-boot", "type": "get_state"}) + "\n")
+        proc.stdin.flush()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if msg.get("id") != "fleet-daemon-boot":
+                continue
+            if msg.get("success"):
+                return
+            raise PrimeBackendError(f"daemon bootstrap rejected: {line[:200]}")
+        raise PrimeBackendError("timed out bootstrapping the prime-agent daemon")
+    finally:
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+
 def list_sessions(include_saved: bool = True) -> list[dict]:
-    """All daemon-known sessions (live + saved/draft/archived when include_saved)."""
+    """All daemon-known sessions (live + saved/draft/archived when include_saved).
+
+    Self-healing: if the daemon is down (cold boot), bootstrap it and retry once.
+    """
     args = ["list", "--json"]
     if include_saved:
         args.insert(1, "--all")
-    cp = _run_prime(args, timeout=20)
-    if cp.returncode != 0:
-        raise PrimeBackendError(f"prime-agent list failed: {cp.stderr.strip() or cp.stdout.strip()}")
-    try:
-        data = json.loads(cp.stdout)
-    except json.JSONDecodeError as e:
-        raise PrimeBackendError(f"prime-agent list returned non-JSON: {cp.stdout[:200]}") from e
-    return data.get("sessions", [])
+    last_err = ""
+    for attempt in range(2):
+        cp = _run_prime(args, timeout=20)
+        if cp.returncode == 0:
+            try:
+                data = json.loads(cp.stdout)
+            except json.JSONDecodeError as e:
+                raise PrimeBackendError(f"prime-agent list returned non-JSON: {cp.stdout[:200]}") from e
+            return data.get("sessions", [])
+        last_err = ((cp.stderr or "") + (cp.stdout or "")).strip()
+        if attempt == 0 and _daemon_unreachable(last_err):
+            ensure_daemon()
+            continue
+        break
+    raise PrimeBackendError(f"prime-agent list failed: {last_err[:300]}")
 
 
 def find_session_by_name(worker_name: str) -> dict | None:
