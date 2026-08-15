@@ -2801,9 +2801,37 @@ def attach(
         raise typer.Exit(rc)
 
     # Local exec path — prime-agent workers attach natively via the daemon.
-    if (worker.get("agent_backend") or "claude") == "prime":
+    # The server record is the source of truth for the backend, but servers
+    # running pre-prime code don't report it — fall back to the on-disk worker
+    # marker (.cfleet-worker), which every prime relay writes.
+    attach_backend = worker.get("agent_backend") or ""
+    if attach_backend not in ("claude", "prime"):
+        try:
+            _marker = _json.loads((Path(workspace) / ".cfleet-worker").read_text())
+            attach_backend = _marker.get("backend", "") or "claude"
+        except Exception:
+            attach_backend = "claude"
+
+    if attach_backend == "prime":
         import subprocess as _sp
+        import shutil as _shutil_pa
         from cfleet.prime_backend import PrimeAgentBackend, check_prime_available
+
+        prime_bin = _shutil_pa.which("prime-agent")
+        if not prime_bin:
+            # Non-interactive SSH gives a minimal PATH; check common install spots.
+            home = os.environ.get("HOME", "")
+            for candidate in (
+                f"{home}/.npm-global/bin/prime-agent",
+                f"{home}/.local/bin/prime-agent",
+                "/usr/local/bin/prime-agent",
+            ):
+                if Path(candidate).exists():
+                    prime_bin = candidate
+                    break
+        if not prime_bin:
+            console.print("[red]`prime-agent` CLI not found on PATH or in common install dirs.[/red]")
+            raise typer.Exit(1)
 
         problem = check_prime_available()
         if problem:
@@ -2816,7 +2844,7 @@ def attach(
         except Exception as e:
             console.print(f"[yellow]Could not wake session ({e}); trying attach anyway.[/yellow]")
         console.print(f"[dim]Attaching to prime-agent session '{name}' — detaching leaves it running.[/dim]")
-        rc = _sp.run(["prime-agent", "attach", name], cwd=workspace).returncode
+        rc = _sp.run([prime_bin, "attach", name], cwd=workspace).returncode
         raise typer.Exit(rc)
 
     model = worker.get("model") or cfg.resolve_model() or "claude-opus-4-6"
