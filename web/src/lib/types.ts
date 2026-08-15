@@ -11,6 +11,7 @@ export interface Worker {
   last_prompt: string | null;
   last_prompt_at: string | null;
   connected: boolean;
+  agent_backend?: string; // "claude" (default) | "prime" 
   // enriched by detail endpoint
   provider?: string;
   machine_ip?: string;

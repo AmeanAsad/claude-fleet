@@ -94,6 +94,12 @@ export default function WorkerList({
                 </div>
                 <div className="font-mono text-[11px] text-text-dim truncate leading-tight mt-0.5">
                   {w.machine_name || "—"}
+                  {w.agent_backend === "prime" && (
+                    <>
+                      <span className="text-rule mx-1">·</span>
+                      <span className="text-signal">prime</span>
+                    </>
+                  )}
                   {w.status !== "idle" && w.status !== "ready" && (
                     <>
                       <span className="text-rule mx-1">·</span>

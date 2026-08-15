@@ -119,6 +119,7 @@ export interface SpawnRequest {
   region?: string;
   machine_name?: string;
   cwd?: string;
+  agent_backend?: string;
 }
 
 export async function spawnWorker(

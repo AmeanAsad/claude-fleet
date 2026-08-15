@@ -20,6 +20,7 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
   const [provider, setProvider] = useState("");
   const [vmType, setVmType] = useState("");
   const [model, setModel] = useState("");
+  const [backend, setBackend] = useState("claude");
   const [instanceType, setInstanceType] = useState("");
   const [region, setRegion] = useState("");
   const [cwd, setCwd] = useState("");
@@ -67,6 +68,7 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
         machine_name: pickedMachine!.name,
       };
       if (model.trim()) req.model = model.trim();
+      if (backend !== "claude") req.agent_backend = backend;
       if (pickedMachine!.provider !== "devcontainer") {
         req.cwd = cwd.trim() || "~";
       }
@@ -152,6 +154,22 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
           )}
         </Field>
 
+        <Field label="Backend">
+          <select
+            value={backend}
+            onChange={(e) => setBackend(e.target.value)}
+            className="w-full bg-panel text-text px-2.5 py-2 text-[14px] focus:outline-none focus:border-signal font-mono border border-rule"
+          >
+            <option value="claude">claude code</option>
+            <option value="prime">prime-agent</option>
+          </select>
+          {backend === "prime" && (
+            <div className="font-mono text-[11px] text-text-dim mt-1.5">
+              requires prime-agent installed + authed on the machine · sessions persist natively
+            </div>
+          )}
+        </Field>
+
         <Field label="Name">
           <input
             ref={nameRef}
@@ -167,7 +185,7 @@ export default function SpawnModal({ open, onClose, onSpawned }: Props) {
           <input
             value={model}
             onChange={(e) => setModel(e.target.value)}
-            placeholder={config?.model || "claude-opus-4-6"}
+            placeholder={backend === "prime" ? "prime-agent default" : (config?.model || "claude-opus-4-6")}
             className="w-full bg-panel text-text px-2.5 py-2 text-[14px] focus:outline-none focus:border-signal font-mono border border-rule"
           />
         </Field>
