@@ -497,7 +497,10 @@ def create_server_app() -> FastAPI:
 
             if worker_name in state.workers:
                 w = state.workers[worker_name]
-                if w.status in ("spawning", "provisioning", "errored"):
+                if w.status in ("spawning", "provisioning", "errored", "stopped"):
+                    # A (re-)registration means the relay is alive: stopped is
+                    # what a managed worker's record shows after its relay's
+                    # WS dropped, so it must recover here too.
                     w.status = "idle"
             else:
                 w = WS(
