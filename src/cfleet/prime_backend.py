@@ -864,7 +864,9 @@ async def _prime_status_poller(ws, runtime: _PrimeRuntime) -> None:
                 runtime.info.session_id = st.get("session_id", runtime.info.session_id)
                 runtime.tail_offset = 0  # new generation → replay to resync dashboard
 
-            if lifecycle in ("saved", "archived", "missing"):
+            if lifecycle in ("saved", "archived", "missing", "draft"):
+                # draft = created but never prompted; the daemon may report a
+                # stale "working" activity flag from the promotion path.
                 fleet_status = "idle"
             elif activity == "working":
                 fleet_status = "working"
