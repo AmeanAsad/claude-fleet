@@ -1956,10 +1956,17 @@ def _run_prime_agent_worker(
         console.print(f"[red]prime-agent backend unavailable: {problem}[/red]")
         raise typer.Exit(1)
 
-    # Model handling: only an explicit --model is forwarded to prime-agent;
-    # otherwise the daemon's own default model is used (prime auth lives in
-    # ~/.prime/agent on the worker machine, not in fleet config).
-    backend = PrimeAgentBackend(name, workspace, model or None)
+    # Model handling: only a prime-resolvable --model is forwarded to
+    # prime-agent; otherwise the daemon's own default model is used (prime
+    # auth lives in ~/.prime/agent on the worker machine, not in fleet
+    # config). Claude/Anthropic model ids are meaningless to prime-agent
+    # unless the box has anthropic auth configured, and worse, they get
+    # baked into the session so every later send fails with
+    # "No API key found for anthropic" — so drop them here.
+    prime_model = (model or "").strip()
+    if prime_model.lower().startswith("claude"):
+        prime_model = ""
+    backend = PrimeAgentBackend(name, workspace, prime_model or None)
 
     console.print(f"Starting prime-agent worker [bold]{name}[/bold] on {machine_name}")
     console.print(f"  Server:  {server_url}")
