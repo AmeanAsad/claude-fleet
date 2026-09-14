@@ -2395,6 +2395,36 @@ async def _handle_server_command(ws, data: dict, runtime: "_AgentRuntime", worke
             }))
 
 
+def _patch_sdk_message_parser() -> None:
+    """Tolerate newer claude-CLI message types the pinned SDK can't parse.
+
+    claude-code-sdk 0.0.25 (latest under that name) raises MessageParseError on
+    message types introduced by newer claude CLI releases (e.g. rate_limit_event),
+    which kills the whole turn. Wrap the parser so unknown types degrade to a
+    skipped SystemMessage instead of crashing the query stream. Safe no-op when
+    the SDK internals change or the types module is absent.
+    """
+    try:
+        from claude_code_sdk._internal import client as _sdk_client
+        from claude_code_sdk.types import SystemMessage as _SystemMessage
+        if getattr(_sdk_client.parse_message, "_cfleet_tolerant", False):
+            return
+        _orig_parse = _sdk_client.parse_message
+
+        def _tolerant_parse(data):
+            try:
+                return _orig_parse(data)
+            except Exception as e:
+                if "Unknown message type" in str(e):
+                    return _SystemMessage(subtype="cfleet_skipped_unknown", data=data)
+                raise
+
+        _tolerant_parse._cfleet_tolerant = True  # type: ignore[attr-defined]
+        _sdk_client.parse_message = _tolerant_parse
+    except Exception:
+        pass
+
+
 async def _agent_run_sdk(ws, runtime: "_AgentRuntime", prompt: str) -> None:
     """Run a single SDK turn against the worker's session.
 
@@ -2408,6 +2438,8 @@ async def _agent_run_sdk(ws, runtime: "_AgentRuntime", prompt: str) -> None:
     import traceback
     from claude_code_sdk import query, ClaudeCodeOptions
     from cfleet.sdk_serialize import serialize_message as _serialize_message
+
+    _patch_sdk_message_parser()
 
     runtime.status = "working"
 
