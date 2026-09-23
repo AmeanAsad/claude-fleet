@@ -391,8 +391,23 @@ class PrimeAgentBackend:
                 "try `prime-agent status`)"
             )
 
-        # Rename to the worker name (best-effort; adoption still works by id).
-        selector = info["active_id"] or info["session_id"]
+        # Rename to the worker name. On prime-agent >= 0.8 the activeSessionId
+        # is retired as soon as the RPC client detaches (the session falls back
+        # to a saved/draft state that rename rejects), and on >= 0.9 rename only
+        # accepts genuinely-live sessions. A wake-send transitions the session
+        # back to live on every supported version (and is a harmless delivery
+        # on 0.7.x), after which rename-by-active-id works.
+        wake = self.send(
+            "You are a fleet worker session managed by claude-fleet. Acknowledge briefly.",
+            target=info["session_id"],
+        )
+        time.sleep(2)
+        # Re-resolve by session id to learn the (new) active id post-wake.
+        selector = info["active_id"]
+        for s in list_sessions(include_saved=True):
+            if s.get("sessionId") == info["session_id"] and s.get("id"):
+                selector = s["id"]
+                break
         cp = _run_prime(["rename", selector, self.worker_name], timeout=20)
         if cp.returncode != 0:
             raise PrimeBackendError(
@@ -436,10 +451,14 @@ class PrimeAgentBackend:
 
     # -- prompts ------------------------------------------------------------
 
-    def send(self, prompt: str, timeout: float = 30.0) -> None:
-        """Deliver a prompt to the worker's session. Wakes saved sessions."""
+    def send(self, prompt: str, timeout: float = 30.0, target: str | None = None) -> None:
+        """Deliver a prompt to the worker's session. Wakes saved sessions.
+
+        `target` overrides the recipient selector (used during session
+        creation, before the session carries the worker name).
+        """
         cp = _run_prime(
-            ["send", self.worker_name, prompt, "--json"],
+            ["send", target or self.worker_name, prompt, "--json"],
             timeout=timeout,
         )
         out = (cp.stdout or "") + (cp.stderr or "")
