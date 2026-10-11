@@ -293,18 +293,17 @@ class PrimeAgentBackend:
     # -- creation ---------------------------------------------------------
 
     def _rpc_create_session(self, resume_session_id: str | None = None) -> PrimeSessionInfo:
-        """Create (or resume) a session and promote it to a resident daemon worker.
+        """Create (or resume) a session and make it a named, live daemon worker.
 
-        Recipe (validated on 0.7.2):
-          1. `prime-agent --mode rpc [--resume <id>] --cwd <dir> [--model <m>]`
-          2. RPC `set_heartbeat` → daemon promotes the client-owned session to
-             resident and returns activeSessionId + sessionId + sessionFile.
-          3. Close RPC stdin (session stays resident).
-          4. `prime-agent rename <activeId> <worker_name>`.
-          5. `prime-agent schedule cancel <heartbeat job id>` (the heartbeat was
-             only the promotion vehicle).
+        1. `prime-agent --mode rpc [--resume <id>] [--model <m>]` in the worker
+           cwd: RPC `get_state` gives sessionId/sessionFile/model, and
+           `set_session_name` names it. RPC mode runs in-process on >= 0.10,
+           but the session is saved to disk.
+        2. Close RPC.
+        3. `prime-agent send <sessionId>` wakes the saved session in the daemon,
+           where it stays live under the worker name.
         """
-        args = ["--mode", "rpc", "--cwd", self.cwd]
+        args = ["--mode", "rpc"]
         if resume_session_id:
             args += ["--resume", resume_session_id]
         if self.model:
@@ -320,18 +319,12 @@ class PrimeAgentBackend:
             bufsize=1,
             env=_clean_prime_env(),
         )
-        info: dict[str, str] = {}
-        try:
-            cmd = {
-                "id": "fleet-promote",
-                "type": "set_heartbeat",
-                "schedule": "every 30m",
-                "prompt": "fleet residency placeholder (cancelled immediately)",
-            }
+
+        def call(cmd: dict, timeout: float = 45) -> dict:
             assert proc.stdin and proc.stdout
             proc.stdin.write(json.dumps(cmd) + "\n")
             proc.stdin.flush()
-            deadline = time.monotonic() + 45
+            deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 line = proc.stdout.readline()
                 if not line:
@@ -340,94 +333,55 @@ class PrimeAgentBackend:
                     msg = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if msg.get("id") != "fleet-promote":
-                    continue
-                if not msg.get("success"):
-                    raise PrimeBackendError(f"heartbeat promotion rejected: {line[:300]}")
-                hb = (msg.get("data") or {}).get("heartbeat") or {}
-                info = {
-                    "job_id": hb.get("id", ""),
-                    "active_id": hb.get("activeSessionId", ""),
-                    "session_id": hb.get("sessionId", ""),
-                    "session_file": hb.get("sessionFile", ""),
-                }
-                break
-            # Grab the resolved model so the fleet UI can display it even
-            # before the first turn.
-            if info.get("session_id"):
-                try:
-                    proc.stdin.write(json.dumps({"id": "fleet-model", "type": "get_state"}) + "\n")
-                    proc.stdin.flush()
-                    mdeadline = time.monotonic() + 10
-                    while time.monotonic() < mdeadline:
-                        line = proc.stdout.readline()
-                        if not line:
-                            break
-                        try:
-                            msg = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if msg.get("id") != "fleet-model" or not msg.get("success"):
-                            continue
-                        model_obj = (msg.get("data") or {}).get("model") or {}
-                        if isinstance(model_obj, dict) and model_obj.get("id"):
-                            info["model"] = model_obj["id"]
-                        break
-                except Exception:
-                    pass
+                if msg.get("id") == cmd["id"] and msg.get("type") == "response":
+                    if not msg.get("success"):
+                        raise PrimeBackendError(f"RPC {cmd['type']} failed: {line[:300]}")
+                    return msg.get("data") or {}
+            raise PrimeBackendError(f"RPC {cmd['type']} got no response")
+
+        try:
+            state = call({"id": "fleet-state", "type": "get_state"})
+            call({"id": "fleet-name", "type": "set_session_name", "name": self.worker_name})
         finally:
             try:
                 proc.stdin.close()
             except Exception:
                 pass
             try:
-                proc.terminate()
+                proc.wait(timeout=10)
             except Exception:
-                pass
+                proc.terminate()
 
-        if not info.get("session_id"):
-            raise PrimeBackendError(
-                "prime-agent RPC promotion returned no session (is the daemon healthy? "
-                "try `prime-agent status`)"
-            )
+        session_id = state.get("sessionId", "")
+        if not session_id:
+            raise PrimeBackendError("prime-agent RPC returned no session id")
+        model_obj = state.get("model") or {}
+        model = model_obj.get("id", "") if isinstance(model_obj, dict) else ""
 
-        # Rename to the worker name. On prime-agent >= 0.8 the activeSessionId
-        # is retired as soon as the RPC client detaches (the session falls back
-        # to a saved/draft state that rename rejects), and on >= 0.9 rename only
-        # accepts genuinely-live sessions. A wake-send transitions the session
-        # back to live on every supported version (and is a harmless delivery
-        # on 0.7.x), after which rename-by-active-id works.
-        wake = self.send(
+        self.send(
             "You are a fleet worker session managed by claude-fleet. Acknowledge briefly.",
-            target=info["session_id"],
+            target=session_id,
         )
-        time.sleep(2)
-        # Re-resolve by session id to learn the (new) active id post-wake.
-        selector = info["active_id"]
-        for s in list_sessions(include_saved=True):
-            if s.get("sessionId") == info["session_id"] and s.get("id"):
-                selector = s["id"]
+        active_id = ""
+        for _ in range(10):
+            for s in list_sessions(include_saved=True):
+                if s.get("sessionId") == session_id and _is_resident(s):
+                    active_id = s.get("id", "")
+                    break
+            if active_id:
                 break
-        cp = _run_prime(["rename", selector, self.worker_name], timeout=20)
-        if cp.returncode != 0:
-            raise PrimeBackendError(
-                f"prime-agent rename failed: {cp.stderr.strip() or cp.stdout.strip()}"
-            )
-
-        # Cancel the placeholder heartbeat — residency survives cancellation.
-        if info.get("job_id"):
-            _run_prime(["schedule", "cancel", info["job_id"]], timeout=20)
+            time.sleep(1)
+        if not active_id:
+            raise PrimeBackendError(f"session {session_id} did not come up live in the daemon")
 
         return PrimeSessionInfo(
             worker_name=self.worker_name,
-            session_id=info["session_id"],
-            session_file=info["session_file"],
-            active_id=info["active_id"],
+            session_id=session_id,
+            session_file=state.get("sessionFile", ""),
+            active_id=active_id,
             lifecycle="live",
-            model=info.get("model", ""),
+            model=model,
         )
-
-    # -- adoption / creation entry point -----------------------------------
 
     def ensure_session(self, resume_session_id: str | None = None) -> PrimeSessionInfo:
         """Idempotently get this worker's prime session.
