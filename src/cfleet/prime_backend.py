@@ -460,7 +460,13 @@ class PrimeAgentBackend:
 
         Idempotent: an already-stopped or unknown session is a no-op.
         """
-        cp = _run_prime(["stop", self.worker_name, "--json"], timeout=30)
+        # prime-agent >= 0.10 only stops by active id, not by session name.
+        target = self.worker_name
+        for s in list_sessions(include_saved=False):
+            if s.get("sessionName") == self.worker_name and s.get("id"):
+                target = s["id"]
+                break
+        cp = _run_prime(["stop", target, "--json"], timeout=30)
         out = (cp.stdout or "") + (cp.stderr or "")
         if cp.returncode != 0:
             benign = ("unknown" in out.lower() or "not found" in out.lower()
