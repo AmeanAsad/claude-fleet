@@ -1948,6 +1948,7 @@ def _run_prime_agent_worker(
         PrimeAgentBackend,
         PrimeBackendError,
         check_prime_available,
+        prime_model_available,
         run_prime_worker,
     )
 
@@ -1964,7 +1965,9 @@ def _run_prime_agent_worker(
     # baked into the session so every later send fails with
     # "No API key found for anthropic" — so drop them here.
     prime_model = (model or "").strip()
-    if prime_model.lower().startswith("claude"):
+    # The fleet's default model is a Claude Code id; only pass a model to
+    # prime-agent when prime-agent actually lists it.
+    if prime_model and not prime_model_available(prime_model):
         prime_model = ""
     backend = PrimeAgentBackend(name, workspace, prime_model or None)
 

@@ -119,6 +119,16 @@ def prime_version() -> tuple[int, int, int] | None:
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
 
+def prime_model_available(model: str) -> bool:
+    """True if `prime-agent model list` has `model` (an id, or `provider/id`)."""
+    provider, _, model_id = model.rpartition("/")
+    cp = _run_prime(["model", "list", model_id], timeout=30)
+    if cp.returncode != 0:
+        return False
+    return any(len(cols) > 1 and cols[1] == model_id and provider in ("", cols[0])
+               for cols in (line.split() for line in cp.stdout.splitlines()))
+
+
 def check_prime_available() -> str | None:
     """Return a human-readable problem string, or None if prime-agent looks usable."""
     if not resolve_prime_bin():
