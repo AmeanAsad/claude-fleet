@@ -3004,12 +3004,17 @@ def attach(
                 for k, v in env.items():
                     if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "CFLEET_", "GIT_CONFIG_", "GH_", "PATH")):
                         lines.append(f"export {k}={__import__('shlex').quote(v)}")
+                # Old screen builds (macOS ships 4.00) garble 24-bit color, and
+                # claude switches to it when COLORTERM=truecolor is inherited.
+                # TERMINFO from terminals like Ghostty hides the system terminfo.
+                lines.append("unset COLORTERM TERMINFO")
+                lines.append("export TERM=screen-256color")
                 lines.append(f"cd {__import__('shlex').quote(workspace)}")
                 lines.append(f"exec {claude_cmd_str}")
                 env_script.write_text("\n".join(lines) + "\n")
                 env_script.chmod(0o700)
                 subprocess.run(
-                    [screen_bin, "-S", screen_name, "-t", name, str(env_script)],
+                    [screen_bin, "-T", "screen-256color", "-S", screen_name, "-t", name, str(env_script)],
                     cwd=workspace, env=env,
                 )
             finally:
