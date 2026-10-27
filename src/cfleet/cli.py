@@ -2971,7 +2971,12 @@ def attach(
     screen_bin = _shutil_screen.which("screen")
     screen_name = f"cfleet-{name}"
 
-    claude_cmd_str = claude_bin + " --resume " + session_id + " --model " + model
+    # A worker that has never run a turn has no transcript yet, and
+    # `claude --resume` exits with "No conversation found". Start the
+    # conversation under the worker's session id instead.
+    transcript = lock_path.with_suffix(".jsonl")
+    session_flag = "--resume" if transcript.exists() else "--session-id"
+    claude_cmd_str = claude_bin + f" {session_flag} " + session_id + " --model " + model
     if effective_skip:
         claude_cmd_str += " --dangerously-skip-permissions"
 
@@ -3016,7 +3021,7 @@ def attach(
     else:
         console.print(f"[dim]Lock acquired. Launching claude --resume on session {session_id[:8]}...[/dim]")
         console.print("[dim yellow]screen not found — session will not survive SSH disconnects. Install screen for persistence.[/dim yellow]")
-        claude_cmd = [claude_bin, "--resume", session_id, "--model", model]
+        claude_cmd = [claude_bin, session_flag, session_id, "--model", model]
         if effective_skip:
             claude_cmd.append("--dangerously-skip-permissions")
         try:
